@@ -129,6 +129,20 @@ names_in(selection::TestImpactAnalysis.Selection)::Vector{String} = sort(unique(
     @test_throws "cannot parse" selected_after(root, "src/P.jl", "x + 1", "x + )")
 end
 
+@testset "an import changes the names it stops importing, not the ones it starts importing" begin
+    root = mktempdir()
+    commit = fixture(root)
+    # `h` mentions `S`: an import of `S` reaches it only by dropping the name.
+    @test isempty(names_in(selected_after(root, "src/P.jl", "module P\n", "module P\nusing Q: S\n")))
+
+    write_file(root, "src/P.jl", replace(PACKAGE, "module P\n" => "module P\nusing Q: S\n"))
+    git_run(root, "commit", "-q", "-am", "import S")
+    imported = strip(git_run(root, "rev-parse", "HEAD"))
+    write_file(root, "map.toml", replace(read(joinpath(root, "map.toml"), String), commit => imported))
+    @test names_in(selected_after(root, "src/P.jl", "using Q: S\n", "")) == ["uses S"]
+    @test isempty(names_in(selected_after(root, "src/P.jl", "using Q: S\n", "using Q: S, T\n")))
+end
+
 @testset "pattern and coverage records" begin
     pattern = Regex(retest_pattern(["a (b)", "c.d"]))
     @test occursin(pattern, "/a (b)")

@@ -95,7 +95,8 @@ testset is printed with the rule that chose it, followed by a regex for the runn
 | `Project.toml` / `Manifest*.toml` (root or a source dir) | the full suite |
 | a function's body | testsets that executed a line of it |
 | a function's signature, or a method added or removed | testsets that executed any method of that name |
-| a struct, abstract/primitive type, const, global, macro, `@enum`, `using`, rule macro… | testsets that executed a function mentioning one of its names, or whose own code mentions it. Names spread through definitions that mention them (`const V = Vector{S}`). |
+| a struct, abstract/primitive type, const, global, macro, `@enum`, rule macro… | testsets that executed a function mentioning one of its names, or whose own code mentions it. Names spread through definitions that mention them (`const V = Vector{S}`). |
+| a `using` or `import` | as above, for each name it no longer imports. A name it starts importing selects nothing by itself: code that starts using it is a change of its own. |
 | a testset | that testset |
 | a test helper or test constant | testsets that mention it, transitively |
 | a non-`.jl` file under the tests directory | testsets whose code or helpers name the file |

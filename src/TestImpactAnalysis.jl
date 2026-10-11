@@ -659,10 +659,24 @@ function binding_keys(item::Item)::Vector{String}
     return item.keys
 end
 
-"The changed names of a delta: what its touched non-function items define, old and new."
+"Whether `item` is a `using` or `import` statement."
+import_item(item::Item)::Bool = item.kind == :other && occursin(r"^\s*(using|import)\b", item.text)
+
+"The names the `using` and `import` statements among `items` bring in."
+function imported_names(items::AbstractVector{Item})::Vector{String}
+    return unique(reduce(vcat, (binding_keys(item) for item in items if import_item(item)); init = String[]))
+end
+
+"""
+The changed names of a delta: what its touched non-function items define, old and new. An
+import defines nothing; it changes which names resolve. A name it stops importing breaks the
+code that still mentions it, so it counts; a name it starts importing reaches only code that
+starts using it, which is a change of its own.
+"""
 function delta_names(delta::Delta)::Vector{String}
-    touched = [item for item in vcat(delta.old_hit, delta.new_hit) if item.kind in (:binding, :other)]
-    return unique(reduce(vcat, (binding_keys(item) for item in touched); init = String[]))
+    touched = [item for item in vcat(delta.old_hit, delta.new_hit) if item.kind in (:binding, :other) && !import_item(item)]
+    dropped = setdiff(imported_names(delta.old_hit), imported_names(delta.new_hit))
+    return unique(vcat(reduce(vcat, (binding_keys(item) for item in touched); init = String[]), dropped))
 end
 
 """
