@@ -49,6 +49,7 @@ Options (`--root` defaults to the current directory, `--map` to `ROOT/test-impac
 | `--tests FILE` | build | Test entry file, searched for testsets and followed through literal `include`s |
 | `--source DIR` | build | Source directory to cover; repeatable (default `src`) |
 | `--runner FILE` | build, run | Runner script (default `test/runtests.jl`) |
+| `--project DIR` | build | Julia project the runner runs in, relative to `--root` (default `.`); recorded in the map, so `run` uses it too |
 | `--jobs N` | build | Testsets run at once |
 | `--timeout SECONDS` | build | Per-testset limit; on timeout the process gets SIGINT, so it still writes its coverage |
 | `--only SUBSTRING` | build | Map only matching testsets, for a smoke run |

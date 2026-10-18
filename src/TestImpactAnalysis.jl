@@ -436,7 +436,8 @@ end
 
 """
 A coverage map. `definitions` lists each source file's function headers at `commit`, in
-file order, and a testset's coverage names functions by their position in that list. A
+file order, and a testset's coverage names functions by their position in that list.
+`project` is the Julia project the runner runs in, relative to the root. A
 function is known by its file and its signature header without whitespace, so methods
 sharing a name are told apart by their arguments, and an edit elsewhere in the file
 leaves the identity alone.
@@ -446,6 +447,7 @@ struct CoverageMap
     tests::String
     sources::Vector{String}
     runner::String
+    project::String
     definitions::Dict{String,Vector{String}}
     testsets::Dict{String,TestsetCoverage}
 end
@@ -492,7 +494,9 @@ function read_map(path::AbstractString)::CoverageMap
                 Dict(String(file) => headers_at(definitions[file], positions) for (file, positions) in entry["functions"]),
             ) for (name, entry) in document["testsets"]
     )
-    return CoverageMap(meta["commit"], meta["tests"], String[meta["sources"]...], meta["runner"], definitions, testsets)
+    # Maps from before `--project` ran the runner in the root's project.
+    project = get(meta, "project", ".")
+    return CoverageMap(meta["commit"], meta["tests"], String[meta["sources"]...], meta["runner"], project, definitions, testsets)
 end
 
 """
@@ -1028,14 +1032,15 @@ end
 (exited::Exited)()::Bool = !Base.process_running(exited.process)
 
 """
-One testset's coverage run: a fresh Julia process running `runner` on the testset's name
-with an LCOV tracefile of its own, counting lines only under `covered` (an `@path`
+One testset's coverage run: a fresh Julia process running `runner` in `project` on the
+testset's name with an LCOV tracefile of its own, counting lines only under `covered` (an `@path`
 selector, so dependencies keep their package images). Julia 1.13 matches the selector
 against real paths: a path through a symlink counts nothing.
 """
 struct Worker
     root::String
     runner::String
+    project::String
     logs::String
     timeout::Int
     sources::Vector{String}
@@ -1079,7 +1084,7 @@ function (worker::Worker)(name::AbstractString)::Pair{String,Dict{String,Any}}
     # coverage-flagged process: distributed workers would start without the coverage flags).
     command = addenv(
         Cmd(
-            `$(Base.julia_cmd()) --project=$(worker.root) --startup-file=no --threads=2 --code-coverage=@$(worker.covered) --code-coverage=$info $(joinpath(worker.root, worker.runner)) $(retest_pattern([name]))`;
+            `$(Base.julia_cmd()) --project=$(joinpath(worker.root, worker.project)) --startup-file=no --threads=2 --code-coverage=@$(worker.covered) --code-coverage=$info $(joinpath(worker.root, worker.runner)) $(retest_pattern([name]))`;
             dir = worker.root,
         ),
         worker.environment...,
@@ -1129,10 +1134,11 @@ function jl_files(root::AbstractString, dir::AbstractString)::Vector{String}
 end
 
 """
-    build_map(root, out; tests, sources, runner, jobs, timeout, only, shard, shards, commit, environment)
+    build_map(root, out; tests, sources, runner, project, jobs, timeout, only, shard, shards, commit, environment)
 
 Run every top-level testset of `tests` (found statically, following literal includes) in its
-own process and write the map to `out`. Testsets are ordered by source length and dealt
+own process, running `runner` in the Julia project `project` (relative to `root`), and write
+the map to `out`. Testsets are ordered by source length and dealt
 round-robin into `shards` shards; this call runs shard `shard` (`merge` joins the shards'
 maps). The shard's smallest testset runs alone first, so the coverage-flagged
 precompilation finishes before the rest start together. The map lists the functions of every
@@ -1144,6 +1150,7 @@ function build_map(
         tests::AbstractString,
         sources::AbstractVector{<:AbstractString},
         runner::AbstractString,
+        project::AbstractString,
         jobs::Integer,
         timeout::Integer,
         only::AbstractVector{<:AbstractString},
@@ -1176,7 +1183,7 @@ function build_map(
     functions = Dict(path => file_functions(snapshot, path) for path in paths)
     definitions = Dict(path => String[item.header for item in items] for (path, items) in functions)
     line_spans = Dict(path => UnitRange{Int}[item.first:item.last for item in items] for (path, items) in functions)
-    worker = Worker(String(root), String(runner), logs, timeout, String[sources...], covered, environment, line_spans)
+    worker = Worker(String(root), String(runner), String(project), logs, timeout, String[sources...], covered, environment, line_spans)
     results = vcat([worker(first(names))], asyncmap(worker, reverse(names[2:end]); ntasks = jobs))
     document = Dict{String,Any}(
         "meta" => Dict{String,Any}(
@@ -1185,6 +1192,7 @@ function build_map(
             "julia" => string(VERSION),
             "tests" => String(tests),
             "runner" => String(runner),
+            "project" => String(project),
             "sources" => String[sources...],
         ),
         "definitions" => definitions,
@@ -1211,7 +1219,7 @@ function merge_maps(out::AbstractString, inputs::AbstractVector{<:AbstractString
     documents = [TOML.parsefile(input) for input in inputs]
     reference = first(documents)
     for (input, document) in zip(inputs, documents)
-        same_meta = all(document["meta"][key] == reference["meta"][key] for key in ("commit", "tests", "runner", "sources"))
+        same_meta = all(get(document["meta"], key, ".") == get(reference["meta"], key, ".") for key in ("commit", "tests", "runner", "project", "sources"))
         if !same_meta || document["definitions"] != reference["definitions"]
             error(input, " was built from another commit or other files than ", first(inputs))
         end
@@ -1255,11 +1263,12 @@ end
 const USAGE = """
 usage: testimpact.jl COMMAND [options]
   build   [--map MAP] [--root DIR] [--tests test/runtests.jl] [--source src]...
-          [--runner test/runtests.jl] [--jobs N] [--timeout SECONDS] [--only SUBSTRING]...
+          [--runner test/runtests.jl] [--project .] [--jobs N] [--timeout SECONDS] [--only SUBSTRING]...
           [--shard K/N] [--commit REV] [--env NAME=VALUE]...
   merge   [--map MAP] --in SHARD_MAP --in SHARD_MAP ...
   select  [--map MAP] [--root DIR] [--base REV] [--trunk REV] [--to REV]
-  run     the options of select; runs the selected testsets through the map's runner
+  run     the options of select; runs the selected testsets through the map's runner,
+          in the map's project
 --root defaults to the current directory and MAP to ROOT/test-impact-map.toml.
 """
 
@@ -1295,6 +1304,7 @@ function main(args::AbstractVector{<:AbstractString})::Nothing
             tests = option_value(args, "--tests", "test/runtests.jl"),
             sources = sources,
             runner = option_value(args, "--runner", "test/runtests.jl"),
+            project = option_value(args, "--project", "."),
             jobs = parse(Int, option_value(args, "--jobs", string(max(1, Sys.CPU_THREADS)))),
             timeout = parse(Int, option_value(args, "--timeout", "3600")),
             only = option_values(args, "--only"),
@@ -1348,9 +1358,9 @@ function select_command(
     names = sort(unique(first.(selection.reasons)))
     pattern = retest_pattern(names)
     println("pattern: ", pattern)
-    println("run: julia --project=. ", map.runner, " '", pattern, "'")
+    println("run: julia --project=", map.project, " ", map.runner, " '", pattern, "'")
     if run_selected && !isempty(names)
-        run(Cmd(`$(Base.julia_cmd()) --project=$root $(joinpath(root, map.runner)) $pattern`; dir = root))
+        run(Cmd(`$(Base.julia_cmd()) --project=$(joinpath(root, map.project)) $(joinpath(root, map.runner)) $pattern`; dir = root))
     end
     return nothing
 end

@@ -187,6 +187,10 @@ end
     @test sort(collect(keys(read_map(joinpath(root, "map.toml")).testsets))) == ["runs f", "runs g"]
     @test_throws "more than one shard" merge_maps(joinpath(root, "map.toml"), [joinpath(root, "two.toml"), joinpath(root, "again.toml")])
     @test_throws "another commit" merge_maps(joinpath(root, "map.toml"), [joinpath(root, "one.toml"), joinpath(root, "other.toml")])
+    @test read_map(joinpath(root, "one.toml")).project == "."
+    write(joinpath(root, "nested.toml"), replace(shard_map("c0ffee", "uses S"), "[definitions]" => "project = \"test\"\n[definitions]"))
+    @test read_map(joinpath(root, "nested.toml")).project == "test"
+    @test_throws "other files" merge_maps(joinpath(root, "map.toml"), [joinpath(root, "one.toml"), joinpath(root, "nested.toml")])
 end
 
 @testset "identity survives an unrelated edit above a covered function" begin
