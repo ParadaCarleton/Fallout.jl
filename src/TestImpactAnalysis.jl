@@ -319,6 +319,15 @@ function label(snapshot::Snapshot, path::AbstractString)::String
     return string(first(snapshot.revision, 10), ":", path)
 end
 
+"""
+    slashed(path)
+
+`path` with the platform's separator replaced by `/`, the separator of map keys, git paths
+and test paths. `normpath`, `relpath` and coverage tracefiles use the platform's (`\\` on
+Windows); where that is already `/` this changes nothing.
+"""
+slashed(path::AbstractString)::String = replace(path, Base.Filesystem.path_separator => "/")
+
 "The items of `path` at `snapshot`, followed by the items of each file it includes, recursively."
 function located_items(snapshot::Snapshot, path::AbstractString)::Vector{Located}
     items = source_items(read_file(snapshot, path), label(snapshot, path))
@@ -326,7 +335,7 @@ function located_items(snapshot::Snapshot, path::AbstractString)::Vector{Located
 end
 
 function included_items(snapshot::Snapshot, path::AbstractString, item::Item)::Vector{Located}
-    nested = (located_items(snapshot, normpath(joinpath(dirname(path), file))) for file in item.includes)
+    nested = (located_items(snapshot, slashed(normpath(joinpath(dirname(path), file)))) for file in item.includes)
     return vcat([Located(String(path), item)], reduce(vcat, nested; init = Located[]))
 end
 
@@ -1100,9 +1109,10 @@ end
 # ---------------------------------------------------------------------------------------
 
 function relative_path(root::AbstractString, file::AbstractString)::String
-    for prefix in (root, realpath(root))
-        if startswith(file, string(prefix, "/"))
-            return relpath(file, prefix)
+    path = slashed(file)
+    for prefix in slashed.((root, realpath(root)))
+        if startswith(path, string(prefix, "/"))
+            return String(chopprefix(path, string(prefix, "/")))
         end
     end
     return ""
@@ -1245,7 +1255,7 @@ end
 
 function jl_files(root::AbstractString, dir::AbstractString)::Vector{String}
     found = [
-        relpath(joinpath(folder, file), root) for (folder, _, files) in walkdir(joinpath(root, dir))
+        slashed(relpath(joinpath(folder, file), root)) for (folder, _, files) in walkdir(joinpath(root, dir))
             for file in files if endswith(file, ".jl")
     ]
     return sort(found)
