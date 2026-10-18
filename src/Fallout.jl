@@ -12,6 +12,9 @@ runner script runs by path (`--suites`).
   select  compare the working tree (or `--to REV`) with a base and print the testsets
           whose executed code, or whose referenced definitions, changed
   run     select, then run the selected testsets through the runner
+  update  move the map to HEAD by re-recording only the testsets the change selects
+  audit   re-record the longest-unverified testsets within a time budget and report any
+          whose coverage differs from the map (a change selection missed)
 
 The selector never loads the package under test. Units (`unit`, `unit_cache`) run inside
 a test process and cache results while the code they ran is unchanged. See README.md.
@@ -678,14 +681,17 @@ end
 # ---------------------------------------------------------------------------------------
 
 """
-One testset's coverage: its status, wall time, and for each source file the signature
+One testset's coverage: its status, wall time, for each source file the signature
 headers of the functions it executed (a function counts as run when any of its lines,
-signature to `end`, ran).
+signature to `end`, ran), and the commit and time it was last recorded at (`verified`
+is empty when the environment changed since).
 """
 struct TestsetCoverage
     status::String
     ms::Int
     functions::Dict{String, Set{String}}
+    commit::String
+    verified::String
 end
 
 """
@@ -693,7 +699,9 @@ A coverage map. `definitions` lists each source file's function headers at `comm
 file order, and a testset's coverage names functions by their position in that list.
 `project` is the Julia project the runner runs in, relative to the root.
 `suites` is the directory whose files matching `suite_pattern` are the testsets (empty when
-the testsets are the `@testset`s of `tests`). A
+the testsets are the `@testset`s of `tests`). `environment` fingerprints the Julia version
+and the runner project's resolved packages (empty in maps from before it), and `env` holds
+the `NAME=VALUE` variables the runner ran with. A
 function is known by its file and its signature header without whitespace, so methods
 sharing a name are told apart by their arguments, and an edit elsewhere in the file
 leaves the identity alone.
@@ -706,6 +714,8 @@ struct CoverageMap
     project::String
     suites::String
     suite_pattern::String
+    environment::String
+    env::Vector{String}
     definitions::Dict{String, Vector{String}}
     testsets::Dict{String, TestsetCoverage}
 end
@@ -757,6 +767,7 @@ function read_map(path::AbstractString)::CoverageMap
         String(file) => String[headers...]
             for (file, headers) in document["definitions"]
     )
+    # Rows from before `update` were all recorded by the build.
     testsets = Dict(
         String(name) => TestsetCoverage(
             entry["status"],
@@ -764,7 +775,9 @@ function read_map(path::AbstractString)::CoverageMap
             Dict(
                 String(file) => headers_at(definitions[file], positions)
                     for (file, positions) in entry["functions"]
-            )
+            ),
+            get(entry, "commit", meta["commit"]),
+            get(entry, "verified", get(meta, "built", "")),
         )
             for (name, entry) in document["testsets"]
     )
@@ -780,9 +793,48 @@ function read_map(path::AbstractString)::CoverageMap
         project,
         suites,
         suite_pattern,
+        get(meta, "environment", ""),
+        String[get(meta, "env", String[])...],
         definitions,
         testsets,
     )
+end
+
+"""
+    environment_fingerprint(root, project)
+
+A hash of the Julia version and of every package the runner project's manifest resolves,
+except those it tracks by path (their code is in the tree, so git sees it). Manifests are
+often not committed, so a dependency upgrade never shows in a diff; this is how the map
+notices one.
+"""
+function environment_fingerprint(root::AbstractString, project::AbstractString)::String
+    dir = joinpath(root, project)
+    minor = string(VERSION.major, '.', VERSION.minor)
+    names = (
+        "JuliaManifest-v$minor.toml",
+        "Manifest-v$minor.toml",
+        "JuliaManifest.toml",
+        "Manifest.toml",
+    )
+    manifests = [joinpath(dir, name) for name in names if isfile(joinpath(dir, name))]
+    packages = String[]
+    if !isempty(manifests)
+        deps = get(TOML.parsefile(first(manifests)), "deps", Dict{String, Any}())
+        packages = [
+            string(
+                    name,
+                    ' ',
+                    get(entry, "uuid", ""),
+                    ' ',
+                    get(entry, "git-tree-sha1", get(entry, "version", "")),
+                )
+                for (name, entries) in deps
+                for entry in entries
+                if !haskey(entry, "path")
+        ]
+    end
+    return bytes2hex(SHA.sha1(join(vcat(["julia $(VERSION)"], sort(packages)), '\n')))
 end
 
 """
@@ -1204,6 +1256,11 @@ function path_class(
         if startswith(path, string(test_dir, "/"))
             return :fixture
         end
+        # A file in the package holding a source directory (`pkg/` for `pkg/src`) is data the
+        # code may read.
+        if any(dirname(dir) == "" || startswith(path, string(dirname(dir), "/")) for dir in sources)
+            return :data
+        end
         return :ignored
     end
     if path in test_paths
@@ -1228,8 +1285,11 @@ working tree when `target` is empty). Rules, in the order they appear in the rea
   * mentions changed definition: a struct, type, const, global, macro or other non-function
     item changed, and the testset executed a function that mentions its name (or a name
     defined by something that mentions it), or its own code mentions it
+  * reads changed file: a non-`.jl` file of the package changed and the testset executed a
+    function naming it, or using a constant that names it
   * edited testset, new testset, changed test helper, changed fixture file
   * static analysis: the testset reads or analyses code and any `.jl` file changed
+  * map status: the testset did not pass when it was recorded
 """
 function select_testsets(
         root::AbstractString,
@@ -1387,18 +1447,71 @@ function select_testsets(
         init = Pair{String, String}[],
     )
 
-    source_seeds = Set(
-        reduce(
-            vcat,
-            (delta_names(delta) for delta in source_deltas);
-            init = String[],
-        )
-    )
+    # A changed data file selects the testsets that ran a function naming it, and through
+    # the names of the constants that name it, their users.
+    data_files = [
+        change.path
+            for (change, class) in zip(changes, classes)
+            if class == :data
+    ]
     source_binders = [
         located
             for located in old_sources
             if located.item.kind in (:binding, :other)
     ]
+    data_seeds = [
+        key
+            for path in data_files
+            for binder in source_binders
+            if occursin(basename(path), binder.item.text)
+            for key in binding_keys(binder.item)
+    ]
+    data_readers = [
+        path => located
+            for path in data_files
+            for located in old_sources
+            if located.item.kind == :function && occursin(basename(path), located.item.text)
+    ]
+    data_reasons = reduce(
+        vcat,
+        (
+            by_coverage(
+                    map,
+                    located.path,
+                    located.item,
+                    "reads changed file `" * basename(path) * "`",
+                )
+                for (path, located) in data_readers
+        );
+        init = Pair{String, String}[],
+    )
+    # Top-level code naming a file is followed through the non-Base names it uses
+    # (`binding_keys`); code using only Base names reaches no testset.
+    unread = [
+        string(
+                "changed file `",
+                path,
+                "`: no source function or named constant mentions it",
+            )
+            for path in data_files
+            if !any(first(pair) == path for pair in data_readers) &&
+            !any(
+                occursin(basename(path), binder.item.text) &&
+                    !isempty(binding_keys(binder.item))
+                    for binder in source_binders
+            )
+    ]
+
+    source_seeds = Set(
+        vcat(
+            reduce(
+                vcat,
+                (delta_names(delta) for delta in source_deltas);
+                init = String[],
+            ),
+            data_seeds,
+        )
+    )
     source_names = name_closure(source_seeds, source_binders)
     mention_reasons = reduce(
         vcat,
@@ -1533,33 +1646,31 @@ function select_testsets(
             (static_item(located.item) || !isdisjoint(located.item.mentions, static_names))
     ]
 
+    # A testset that did not pass recorded partial coverage, so it runs until it passes.
+    weak_reasons = [
+        name => string("map status ", entry.status, ": runs until it passes")
+            for (name, entry) in map.testsets
+            if entry.status != "ok"
+    ]
+
     every = vcat(
         run_reasons,
         dispatch_reasons,
         mention_reasons,
+        data_reasons,
         edited,
         use_reasons,
         fixture_reasons,
         new_reasons,
         static_reasons,
+        weak_reasons,
     )
     reasons = [pair for pair in every if first(pair) in runnable]
-    weak = sort([name for (name, entry) in map.testsets if entry.status != "ok"])
-    notes = [
-        string(
-            "map testset `",
-            name,
-            "` has status ",
-            map.testsets[name].status,
-            ": its coverage may be partial",
-        )
-            for name in weak
-    ]
     return Selection(
         reasons,
         String[],
         vcat(uncovered, unreached_lines),
-        notes,
+        unread,
         length(changed) + length(added),
         absent_lines,
     )
@@ -1924,16 +2035,74 @@ function build_map(
             shards,
         )
     end
+    functions = source_definitions(root, sources)
+    results = record_testsets(
+        root,
+        out,
+        names,
+        functions;
+        runner,
+        project,
+        by_path = !isempty(suites),
+        sources,
+        jobs,
+        timeout,
+        environment,
+        commit,
+    )
+    meta = Dict{String, Any}(
+        "commit" => commit,
+        "built" => string(Dates.now()),
+        "julia" => string(VERSION),
+        "environment" => environment_fingerprint(root, project),
+        "env" => [string(name, '=', value) for (name, value) in environment],
+        "tests" => String(tests),
+        "runner" => String(runner),
+        "project" => String(project),
+        "suites" => String(suites),
+        "suite_pattern" => String(suite_pattern),
+        "sources" => String[sources...],
+    )
+    write_map(out, meta, functions, Dict{String, Any}(results))
+    report_unhealthy(out, results)
+    return nothing
+end
+
+"The functions of every `.jl` file under `sources`, in file order, as parsed in the working tree."
+function source_definitions(
+        root::AbstractString,
+        sources::AbstractVector{<:AbstractString},
+    )::Dict{String, Vector{Item}}
+    snapshot = Snapshot(String(root), "")
+    paths = reduce(vcat, (jl_files(root, dir) for dir in sources); init = String[])
+    return Dict(path => file_functions(snapshot, path) for path in paths)
+end
+
+"""
+    record_testsets(root, out, names, functions; runner, project, by_path, sources, jobs, timeout, environment, commit)
+
+Run each testset of `names` in its own coverage-flagged process (`jobs` at a time, the first
+alone so precompilation finishes once) and return its map row, stamped with `commit` and
+the time. `functions` are the source files' functions in file order, as `source_definitions`
+returns them.
+"""
+function record_testsets(
+        root::AbstractString,
+        out::AbstractString,
+        names::AbstractVector{<:AbstractString},
+        functions::AbstractDict{String, Vector{Item}};
+        runner::AbstractString,
+        project::AbstractString,
+        by_path::Bool,
+        sources::AbstractVector{<:AbstractString},
+        jobs::Integer,
+        timeout::Integer,
+        environment::AbstractVector{Pair{String, String}},
+        commit::AbstractString,
+    )::Vector{Pair{String, Dict{String, Any}}}
     logs = string(out, ".work")
     mkpath(logs)
     covered = realpath(joinpath(root, length(sources) == 1 ? first(sources) : ""))
-    snapshot = Snapshot(String(root), "")
-    paths = reduce(vcat, (jl_files(root, dir) for dir in sources); init = String[])
-    functions = Dict(path => file_functions(snapshot, path) for path in paths)
-    definitions = Dict(
-        path => String[item.header for item in items]
-            for (path, items) in functions
-    )
     line_spans = Dict(
         path => UnitRange{Int}[item.first:item.last for item in items]
             for (path, items) in functions
@@ -1942,7 +2111,7 @@ function build_map(
         String(root),
         String(runner),
         String(project),
-        !isempty(suites),
+        by_path,
         logs,
         timeout,
         String[sources...],
@@ -1954,24 +2123,35 @@ function build_map(
         [worker(first(names))],
         asyncmap(worker, reverse(names[2:end]); ntasks = jobs),
     )
+    for (_, row) in results
+        row["commit"] = String(commit)
+        row["verified"] = string(Dates.now())
+    end
+    return results
+end
+
+function write_map(
+        out::AbstractString,
+        meta::AbstractDict,
+        functions::AbstractDict{String, Vector{Item}},
+        testsets::AbstractDict,
+    )::Nothing
+    definitions = Dict(
+        path => String[item.header for item in items]
+            for (path, items) in functions
+    )
     document = Dict{String, Any}(
-        "meta" => Dict{String, Any}(
-            "commit" => commit,
-            "built" => string(Dates.now()),
-            "julia" => string(VERSION),
-            "tests" => String(tests),
-            "runner" => String(runner),
-            "project" => String(project),
-            "suites" => String(suites),
-            "suite_pattern" => String(suite_pattern),
-            "sources" => String[sources...],
-        ),
+        "meta" => meta,
         "definitions" => definitions,
-        "testsets" => Dict{String, Any}(results),
+        "testsets" => testsets,
     )
     buffer = IOBuffer()
     TOML.print(buffer, document; sorted = true)
     write(out, take!(buffer))
+    return nothing
+end
+
+function report_unhealthy(out::AbstractString, results::AbstractVector{<:Pair})::Nothing
     unhealthy = [
         name => result["status"]
             for (name, result) in results
@@ -1983,12 +2163,327 @@ function build_map(
         out,
         ": ",
         length(results),
-        " testsets, ",
+        " testsets recorded, ",
         length(unhealthy),
         " not ok",
     )
     for (name, status) in unhealthy
         println(stderr, "[Fallout]   ", status, "  ", name)
+    end
+    return nothing
+end
+
+"""
+    stored_row(entry, headers)
+
+A map row carried over unchanged, its function positions re-encoded against the files'
+new `headers`. Returns the row and the functions it names that no longer exist, which a
+safe selection never leaves behind (the testsets that ran a removed function rerun).
+"""
+function stored_row(
+        entry::TestsetCoverage,
+        headers::AbstractDict{String, Vector{String}},
+    )::Tuple{Dict{String, Any}, Vector{String}}
+    functions = Dict{String, Any}()
+    gone = String[]
+    for (file, ran) in entry.functions
+        known = get(headers, file, String[])
+        positions = ranges_text(findall(in(ran), known))
+        if !isempty(positions)
+            functions[file] = positions
+        end
+        append!(
+            gone,
+            [string(file, ": ", header) for header in sort(collect(setdiff(ran, known)))],
+        )
+    end
+    row = Dict{String, Any}(
+        "status" => entry.status,
+        "ms" => entry.ms,
+        "functions" => functions,
+        "commit" => entry.commit,
+        "verified" => entry.verified,
+    )
+    return row, gone
+end
+
+"`NAME=VALUE` texts as pairs."
+function env_pairs(texts::AbstractVector{<:AbstractString})::Vector{Pair{String, String}}
+    return [
+        String(first(pair)) => String(last(pair))
+            for pair in split.(texts, '='; limit = 2)
+    ]
+end
+
+"The variables the runner runs with: `given` on the command line, else those the map recorded."
+function runner_environment(
+        map::CoverageMap,
+        given::AbstractVector{Pair{String, String}},
+    )::Vector{Pair{String, String}}
+    if isempty(given)
+        return env_pairs(map.env)
+    end
+    return given
+end
+
+"""
+    clean_head(root, map)
+
+The commit at HEAD, refusing a checkout whose tracked files differ from it, or that holds
+untracked files in the source or test directories (the map would record code no commit holds).
+"""
+function clean_head(root::AbstractString, map::CoverageMap)::String
+    dirty = git(root, "status", "--porcelain", "--untracked-files=no")
+    test_dir = isempty(map.suites) ? dirname(map.tests) : map.suites
+    stray = git(
+        root,
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+        "--",
+        map.sources...,
+        isempty(test_dir) ? "." : test_dir,
+    )
+    if !isempty(strip(dirty)) || !isempty(strip(stray))
+        error(
+            "the checkout differs from HEAD; commit or discard these first:\n",
+            dirty,
+            stray,
+        )
+    end
+    return strip(git(root, "rev-parse", "HEAD"))
+end
+
+"""
+    update_map(root, out; jobs, timeout, environment)
+
+Move the map from its commit to HEAD without a full build: re-record the testsets the change
+selects (those whose recorded coverage may now differ, plus any that did not pass), keep the
+rest as they are, and drop testsets that no longer exist. If every selection is safe, the
+result is the map a full build at HEAD would write. A changed environment (Julia or a
+resolved package) keeps the rows but clears their `verified` time, so `audit` re-records
+them first.
+"""
+function update_map(
+        root::AbstractString,
+        out::AbstractString;
+        jobs::Integer,
+        timeout::Integer,
+        environment::AbstractVector{Pair{String, String}},
+    )::Nothing
+    map = read_map(out)
+    head = clean_head(root, map)
+    fingerprint = environment_fingerprint(root, map.project)
+    changed_environment = fingerprint != map.environment
+    variables = runner_environment(map, environment)
+    selection = select_testsets(root, map, map.commit, head)
+    report(stdout, map, selection, map.commit, head)
+    names = sort(unique(first.(selection.reasons)))
+    runnable = Set(
+        located.item.name
+            for located in test_items(
+                Snapshot(String(root), ""),
+                map.tests,
+                map.suites,
+                map.suite_pattern,
+            )
+            if located.item.kind == :testset
+    )
+    functions = source_definitions(root, map.sources)
+    headers = Dict(
+        path => String[item.header for item in items]
+            for (path, items) in functions
+    )
+    results = Pair{String, Dict{String, Any}}[]
+    if !isempty(names)
+        results = record_testsets(
+            root,
+            out,
+            names,
+            functions;
+            map.runner,
+            map.project,
+            by_path = !isempty(map.suites),
+            map.sources,
+            jobs,
+            timeout,
+            environment = variables,
+            commit = head,
+        )
+    end
+    testsets = Dict{String, Any}(results)
+    for (name, entry) in map.testsets
+        if haskey(testsets, name) || !(name in runnable)
+            continue
+        end
+        row, gone = stored_row(entry, headers)
+        if !isempty(gone)
+            println(
+                stderr,
+                "[Fallout] warning: `",
+                name,
+                "` was not selected but ran removed functions (a selection gap): ",
+                join(gone, ", "),
+            )
+        end
+        if changed_environment
+            row["verified"] = ""
+        end
+        testsets[name] = row
+    end
+    dropped = sort([name for name in keys(map.testsets) if !(name in runnable)])
+    meta = TOML.parsefile(out)["meta"]
+    meta["commit"] = head
+    meta["updated"] = string(Dates.now())
+    meta["julia"] = string(VERSION)
+    meta["environment"] = fingerprint
+    meta["env"] = [string(name, '=', value) for (name, value) in variables]
+    write_map(out, meta, functions, testsets)
+    report_unhealthy(out, results)
+    println(
+        stderr,
+        "[Fallout] kept ",
+        length(testsets) - length(results),
+        " rows, dropped ",
+        length(dropped),
+        " removed testsets",
+        isempty(dropped) ? "" : ": " * join(dropped, ", "),
+    )
+    if changed_environment
+        println(
+            stderr,
+            "[Fallout] the Julia version or the resolved packages changed: ",
+            "kept rows are marked unverified for `audit`",
+        )
+    end
+    return nothing
+end
+
+"""
+    audit_map(root, out; budget_minutes, jobs, timeout, environment)
+
+Re-record the testsets verified longest ago (unverified ones first) until their recorded
+wall time, spread over `jobs`, fills `budget_minutes`, and compare each with its map row.
+The map must be at HEAD. Every row is replaced by the fresh one; a row whose functions or
+status differ is a change some selection missed (or a testset whose coverage varies run to
+run), so it is reported and the call fails after writing the map.
+"""
+function audit_map(
+        root::AbstractString,
+        out::AbstractString;
+        budget_minutes::Real,
+        jobs::Integer,
+        timeout::Integer,
+        environment::AbstractVector{Pair{String, String}},
+    )::Nothing
+    map = read_map(out)
+    head = clean_head(root, map)
+    if head != map.commit
+        error(
+            "the map is at ",
+            first(map.commit, 12),
+            " but HEAD is ",
+            first(head, 12),
+            "; run `update` first",
+        )
+    end
+    functions = source_definitions(root, map.sources)
+    headers = Dict(
+        path => String[item.header for item in items]
+            for (path, items) in functions
+    )
+    if headers != map.definitions
+        error(
+            "the map's definitions differ from the files at its commit; ",
+            "rebuild it with `build`",
+        )
+    end
+    oldest = sort(
+        collect(keys(map.testsets));
+        by = name -> (map.testsets[name].verified, name),
+    )
+    budget_ms = budget_minutes * 60_000 * jobs
+    spent = cumsum([map.testsets[name].ms for name in oldest])
+    names = oldest[1:max(1, count(<=(budget_ms), spent))]
+    results = record_testsets(
+        root,
+        out,
+        names,
+        functions;
+        map.runner,
+        map.project,
+        by_path = !isempty(map.suites),
+        map.sources,
+        jobs,
+        timeout,
+        environment = runner_environment(map, environment),
+        commit = head,
+    )
+    drifted = String[]
+    for (name, row) in results
+        before = map.testsets[name]
+        after = Dict(
+            String(file) => headers_at(headers[file], positions)
+                for (file, positions) in row["functions"]
+        )
+        gained = sort(
+            [
+                string(file, ": ", header)
+                    for (file, ran) in after
+                    for header in setdiff(ran, get(before.functions, file, Set{String}()))
+            ]
+        )
+        lost = sort(
+            [
+                string(file, ": ", header)
+                    for (file, ran) in before.functions
+                    for header in setdiff(ran, get(after, file, Set{String}()))
+            ]
+        )
+        if isempty(gained) && isempty(lost) && row["status"] == before.status
+            continue
+        end
+        push!(drifted, name)
+        println(
+            "DRIFT: ",
+            name,
+            " (recorded at ",
+            first(before.commit, 12),
+            ", status ",
+            before.status,
+            " -> ",
+            row["status"],
+            ")",
+        )
+        for line in gained
+            println("  now runs:    ", line)
+        end
+        for line in lost
+            println("  no longer:   ", line)
+        end
+    end
+    document = TOML.parsefile(out)
+    testsets = document["testsets"]
+    for (name, row) in results
+        testsets[name] = row
+    end
+    write_map(out, document["meta"], functions, testsets)
+    println(
+        "audited ",
+        length(results),
+        " of ",
+        length(map.testsets),
+        " testsets; ",
+        length(drifted),
+        " differ from the map",
+    )
+    if !isempty(drifted)
+        error(
+            "audit: ",
+            length(drifted),
+            " testsets differ from the map: ",
+            join(drifted, ", "),
+        )
     end
     return nothing
 end
@@ -2092,14 +2587,19 @@ usage: fallout.jl COMMAND [options]
   select  [--map MAP] [--root DIR] [--base REV] [--to REV]
   run     the options of select; runs the selected testsets through the map's runner,
           in the map's project
+  update  [--map MAP] [--root DIR] [--jobs N] [--timeout SECONDS] [--env NAME=VALUE]...
+          (the checkout must match HEAD; --env defaults to the build's)
+  audit   [--map MAP] [--root DIR] [--budget MINUTES] [--jobs N] [--timeout SECONDS]
+          [--env NAME=VALUE]...   (the map must be at HEAD; --budget defaults to 20)
 --root defaults to the current directory and MAP to ROOT/test-impact-map.toml.
 """
 
 """
     main(args)
 
-Run the `build`, `merge`, `select` or `run` command. Every failure (a file that does not parse,
-a map that does not match the files) is an uncaught error, so the process exits nonzero with it.
+Run the `build`, `merge`, `select`, `run`, `update` or `audit` command. Every failure (a file
+that does not parse, a map that does not match the files) is an uncaught error, so the process
+exits nonzero with it.
 """
 function main(args::AbstractVector{<:AbstractString})::Nothing
     root = abspath(option_value(args, "--root", pwd()))
@@ -2141,10 +2641,31 @@ function main(args::AbstractVector{<:AbstractString})::Nothing
             shard = first(shard),
             shards = last(shard),
             commit = commit,
-            environment = [
-                String(first(pair)) => String(last(pair))
-                    for pair in split.(option_values(args, "--env"), '='; limit = 2)
-            ],
+            environment = env_pairs(option_values(args, "--env")),
+        )
+        return nothing
+    end
+    jobs = parse(Int, option_value(args, "--jobs", string(max(1, Sys.CPU_THREADS))))
+    timeout = parse(Int, option_value(args, "--timeout", "3600"))
+    if command == "update"
+        update_map(
+            root,
+            map_path;
+            jobs,
+            timeout,
+            environment = env_pairs(option_values(args, "--env")),
+        )
+        return nothing
+    end
+    if command == "audit"
+        budget_minutes = parse(Float64, option_value(args, "--budget", "20"))
+        audit_map(
+            root,
+            map_path;
+            budget_minutes,
+            jobs,
+            timeout,
+            environment = env_pairs(option_values(args, "--env")),
         )
         return nothing
     end
@@ -2189,6 +2710,13 @@ function select_command(
     base = strip(git(root, "rev-parse", "--verify", base * "^{commit}"))
     selection = select_testsets(root, map, String(base), String(target))
     report(stdout, map, selection, base, target)
+    if !isempty(map.environment) &&
+            map.environment != environment_fingerprint(root, map.project)
+        println(
+            "note: the map was recorded under another Julia version or other resolved ",
+            "packages; coverage may differ slightly",
+        )
+    end
     names = sort(unique(first.(selection.reasons)))
     arguments = runner_arguments(!isempty(map.suites), names)
     if isempty(map.suites)
