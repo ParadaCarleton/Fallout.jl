@@ -361,3 +361,14 @@ end
     @test runner_arguments(true, ["a/test_f.jl", "test_g.jl"]) == ["a/test_f.jl", "test_g.jl"]
     @test runner_arguments(false, ["x"]) == [retest_pattern(["x"])]
 end
+
+@testset "environment files of the package and the runner's project select the full suite" begin
+    dependency_file = TestImpactAnalysis.dependency_file
+    @test dependency_file("Project.toml", ["src"], ".")
+    @test dependency_file("Manifest-v1.12.toml", ["src"], ".")
+    @test dependency_file("pkg/Project.toml", ["pkg/src"], ".")
+    @test dependency_file("pkg/test/Project.toml", ["pkg/src"], "pkg/test")
+    @test !dependency_file("pkg/docs/Project.toml", ["pkg/src"], "pkg/test")
+    @test !dependency_file("pkg/test/Project.toml", ["pkg/src"], ".")
+    @test !dependency_file("pkg/src/data.toml", ["pkg/src"], ".")
+end

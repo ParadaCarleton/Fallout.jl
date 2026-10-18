@@ -825,14 +825,26 @@ function by_coverage(
     return [name => string(rule, " (", describe_item(path, item), ")") for name in covering(map, path, item)]
 end
 
-function full_suite_reasons(changes::AbstractVector{FileChange}, sources::AbstractVector{<:AbstractString})::Vector{String}
-    return [string(change.path, " changed") for change in changes if dependency_file(change.path, sources)]
+function full_suite_reasons(
+        changes::AbstractVector{FileChange},
+        sources::AbstractVector{<:AbstractString},
+        project::AbstractString,
+    )::Vector{String}
+    return [string(change.path, " changed") for change in changes if dependency_file(change.path, sources, project)]
 end
 
-function dependency_file(path::AbstractString, sources::AbstractVector{<:AbstractString})::Bool
+"""
+    dependency_file(path, sources, project)
+
+Whether `path` is a `Project.toml` or `Manifest*.toml` that decides the environment: in the
+root, in or under a source directory, in the package holding a source directory (`pkg/` for
+`pkg/src`), or in the runner's `project` directory.
+"""
+function dependency_file(path::AbstractString, sources::AbstractVector{<:AbstractString}, project::AbstractString)::Bool
     name = basename(path)
     named = name == "Project.toml" || (startswith(name, "Manifest") && endswith(name, ".toml"))
-    placed = !occursin('/', path) || any(startswith(path, string(dir, "/")) for dir in sources)
+    folders = Set(vcat([""], [dirname(dir) for dir in sources], [project == "." ? "" : rstrip(project, '/')]))
+    placed = dirname(path) in folders || any(startswith(path, string(dir, "/")) for dir in sources)
     return named && placed
 end
 
@@ -889,7 +901,7 @@ function select_testsets(
     classes = [path_class(change.path, test_paths, test_dir, map.sources) for change in changes]
     runnable = Set(located.item.name for located in new_tests if located.item.kind == :testset)
 
-    full = full_suite_reasons(changes, map.sources)
+    full = full_suite_reasons(changes, map.sources, map.project)
     if !isempty(map.suites)
         # The runner decides how every suite runs.
         append!(full, [string(change.path, " changed: the runner runs every suite") for change in changes if change.path == map.runner])
