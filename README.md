@@ -13,7 +13,8 @@ whose name matches a regex given as its first argument, as ReTest does.
 Alternatively, with `--suites DIR`, every file under `DIR` whose name matches
 `--suite-pattern` (default `^test_.*\.jl$`) is one testset, named by its path from `DIR`
 (`systems/test_loop.jl`). The runner then gets the selected paths as its arguments, one
-each, and a change to the runner selects every suite.
+each, and a change to the runner selects every suite. A suite owns the files it includes:
+a code change in one selects the suite, and a testset in one is part of the suite.
 
 ## Usage
 
