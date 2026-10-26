@@ -304,6 +304,8 @@ function suite_fixture(root::AbstractString)::String
     write_file(root, "test/support/helper.jl", "helper() = 1\n")
     write_file(root, "test/a/test_f.jl", "using Test\n@testset \"f\" begin\n    @test P.f(1) == 2\nend\n")
     write_file(root, "test/test_g.jl", "using Test\ninclude(\"support/helper.jl\")\n@testset \"g\" begin\n    @test P.g(helper()) == 2\nend\n")
+    write_file(root, "test/test_h.jl", "include(\"support/setup.jl\")\n")
+    write_file(root, "test/support/setup.jl", "using Test\nsetup() = 1\n@testset \"inner\" begin\n    @test setup() == 1\nend\n")
     git_run(root, "add", "-A")
     git_run(root, "commit", "-q", "-m", "base")
     commit = strip(git_run(root, "rev-parse", "HEAD"))
@@ -325,6 +327,10 @@ function suite_fixture(root::AbstractString)::String
     status = "ok"
     ms = 1
     functions = { "src/P.jl" = "2" }
+    [testsets."test_h.jl"]
+    status = "ok"
+    ms = 1
+    functions = {}
     """
     write_file(root, "map.toml", map)
     write_file(root, ".gitignore", "map.toml\n.gitignore\n")
@@ -355,8 +361,11 @@ end
     rm(joinpath(root, "test/not_a_suite.jl"))
 
     runner = selected_after(root, "test/runtests.jl", "include(suite)", "include(joinpath(@__DIR__, suite))")
-    @test names_in(runner) == ["a/test_f.jl", "test_g.jl"]
+    @test names_in(runner) == ["a/test_f.jl", "test_g.jl", "test_h.jl"]
     @test !isempty(runner.full)
+
+    # A helper the suite runs only through an include, and a testset inside it, belong to the suite.
+    @test names_in(selected_after(root, "test/support/setup.jl", "setup() = 1", "setup() = 2")) == ["test_h.jl"]
 
     @test runner_arguments(true, ["a/test_f.jl", "test_g.jl"]) == ["a/test_f.jl", "test_g.jl"]
     @test runner_arguments(false, ["x"]) == [retest_pattern(["x"])]
@@ -371,4 +380,12 @@ end
     @test !dependency_file("pkg/docs/Project.toml", ["pkg/src"], "pkg/test")
     @test !dependency_file("pkg/test/Project.toml", ["pkg/src"], ".")
     @test !dependency_file("pkg/src/data.toml", ["pkg/src"], ".")
+end
+
+@testset "path options take the form git reports paths in" begin
+    path_option = TestImpactAnalysis.path_option
+    @test path_option("./test/") == "test"
+    @test path_option("./test/runtests.jl") == "test/runtests.jl"
+    @test path_option(".") == "."
+    @test path_option("pkg/../test") == "test"
 end

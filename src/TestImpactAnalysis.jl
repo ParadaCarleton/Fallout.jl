@@ -328,6 +328,9 @@ Windows); where that is already `/` this changes nothing.
 """
 slashed(path::AbstractString)::String = replace(path, Base.Filesystem.path_separator => "/")
 
+"A path option in the form git reports paths: normalized, `/`-separated, no trailing `/` (`./test/` is `test`)."
+path_option(path::AbstractString)::String = String(rstrip(slashed(normpath(path)), '/'))
+
 "The items of `path` at `snapshot`, followed by the items of each file it includes, recursively."
 function located_items(snapshot::Snapshot, path::AbstractString)::Vector{Located}
     items = source_items(read_file(snapshot, path), label(snapshot, path))
@@ -373,9 +376,17 @@ function suite_items(snapshot::Snapshot, dir::AbstractString, pattern::AbstractS
     return reduce(vcat, (suite_file_items(snapshot, dir, path) for path in suite_paths(snapshot, dir, pattern)); init = Located[])
 end
 
+"""
+The suite of file `path`, followed by the items of the files it includes. A testset in an
+included file runs as part of the suite, so it adds its mentions to the suite instead of being
+a testset of its own.
+"""
 function suite_file_items(snapshot::Snapshot, dir::AbstractString, path::AbstractString)::Vector{Located}
     text = read_file(snapshot, path)
     items = source_items(text, label(snapshot, path))
+    includes = unique(reduce(vcat, (item.includes for item in items); init = String[]))
+    nested = reduce(vcat, (located_items(snapshot, slashed(normpath(joinpath(dirname(path), file)))) for file in includes); init = Located[])
+    inner = [located.item for located in nested if located.item.kind == :testset]
     name = relpath_slash(path, dir)
     suite = Item(
         :testset,
@@ -385,12 +396,20 @@ function suite_file_items(snapshot::Snapshot, dir::AbstractString, path::Abstrac
         max(1, count(==('\n'), text)),
         0,
         -1,
-        reduce(union, (item.mentions for item in items); init = Set{String}()),
-        unique(reduce(vcat, (item.includes for item in items); init = String[])),
+        reduce(union, (item.mentions for item in vcat(items, inner)); init = Set{String}()),
+        includes,
         "",
         text,
     )
-    return included_items(snapshot, path, suite)
+    return vcat([Located(String(path), suite)], [located for located in nested if located.item.kind != :testset])
+end
+
+"Each suite's name, with the files it runs: its own and those it includes, recursively."
+function suite_files(snapshot::Snapshot, dir::AbstractString, pattern::AbstractString)::Dict{String, Set{String}}
+    return Dict(
+        relpath_slash(path, dir) => Set(located.path for located in suite_file_items(snapshot, dir, path)) for
+            path in suite_paths(snapshot, dir, pattern)
+    )
 end
 
 "`path` relative to directory `dir`, both `/`-separated paths from the root."
@@ -991,12 +1010,13 @@ function select_testsets(
             item in delta.new_hit if item.kind == :testset
     ]
     if !isempty(map.suites)
-        # A suite is its whole file: any code change in it edits the suite.
+        # A suite is its whole file and the files it includes: a code change in any edits it.
+        files = suite_files(new_snapshot, map.suites, map.suite_pattern)
         append!(
             edited,
             [
-                located.item.name => string("edited suite (", located.path, ")") for located in new_testsets for delta in test_deltas
-                    if delta.path == located.path && !isempty(vcat(delta.old_hit, delta.new_hit))
+                located.item.name => string("edited suite (", delta.path, ")") for located in new_testsets for delta in test_deltas
+                    if delta.path in files[located.item.name] && !isempty(vcat(delta.old_hit, delta.new_hit))
             ],
         )
     end
@@ -1427,6 +1447,8 @@ function main(args::AbstractVector{<:AbstractString})::Nothing
         if isempty(sources)
             sources = ["src"]
         end
+        sources = path_option.(sources)
+        suites = option_value(args, "--suites", "")
         shard = parse.(Int, split(option_value(args, "--shard", "1/1"), '/'))
         commits = option_values(args, "--commit")
         commit = ""
@@ -1438,12 +1460,12 @@ function main(args::AbstractVector{<:AbstractString})::Nothing
         build_map(
             root,
             map_path;
-            tests = option_value(args, "--tests", "test/runtests.jl"),
-            suites = rstrip(option_value(args, "--suites", ""), '/'),
+            tests = path_option(option_value(args, "--tests", "test/runtests.jl")),
+            suites = isempty(suites) ? "" : path_option(suites),
             suite_pattern = option_value(args, "--suite-pattern", DEFAULT_SUITE_PATTERN),
             sources = sources,
-            runner = option_value(args, "--runner", "test/runtests.jl"),
-            project = option_value(args, "--project", "."),
+            runner = path_option(option_value(args, "--runner", "test/runtests.jl")),
+            project = path_option(option_value(args, "--project", ".")),
             jobs = parse(Int, option_value(args, "--jobs", string(max(1, Sys.CPU_THREADS)))),
             timeout = parse(Int, option_value(args, "--timeout", "3600")),
             only = option_values(args, "--only"),
