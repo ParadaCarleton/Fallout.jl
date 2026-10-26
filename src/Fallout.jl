@@ -1,5 +1,5 @@
 """
-    TestImpactAnalysis
+    Fallout
 
 Test impact analysis (regression test selection): run only the tests a change can affect.
 Works for any Julia package whose testsets can be run by name through a runner script that
@@ -15,7 +15,7 @@ runner script runs by path (`--suites`).
 
 Standard library only; it never loads the package under test. See README.md.
 """
-module TestImpactAnalysis
+module Fallout
 
 using Dates: Dates
 using SHA: SHA
@@ -1263,7 +1263,7 @@ function (worker::Worker)(name::AbstractString)::Pair{String,Dict{String,Any}}
     if status == "ok" && isempty(lines)
         status = "no-coverage"
     end
-    println(stderr, "[TestImpactAnalysis] ", status, " ", milliseconds, " ms  ", name)
+    println(stderr, "[Fallout] ", status, " ", milliseconds, " ms  ", name)
     return String(name) => Dict{String,Any}(
         "status" => status,
         "ms" => milliseconds,
@@ -1318,7 +1318,7 @@ function build_map(
     end
     hidden = [describe_item(entry.path, entry.item) for entry in located if entry.item.kind == :other && occursin("@testset", entry.item.text)]
     for place in hidden
-        println(stderr, "[TestImpactAnalysis] warning: testsets inside control flow are not mapped: ", place)
+        println(stderr, "[Fallout] warning: testsets inside control flow are not mapped: ", place)
     end
     spans = Dict(name => sum(entry.item.last - entry.item.first for entry in testsets if entry.item.name == name) for name in unique([entry.item.name for entry in testsets]))
     names = first.(sort(collect(spans); by = last))
@@ -1355,9 +1355,9 @@ function build_map(
     TOML.print(buffer, document; sorted = true)
     write(out, take!(buffer))
     unhealthy = [name => result["status"] for (name, result) in results if result["status"] != "ok"]
-    println(stderr, "[TestImpactAnalysis] wrote ", out, ": ", length(results), " testsets, ", length(unhealthy), " not ok")
+    println(stderr, "[Fallout] wrote ", out, ": ", length(results), " testsets, ", length(unhealthy), " not ok")
     for (name, status) in unhealthy
-        println(stderr, "[TestImpactAnalysis]   ", status, "  ", name)
+        println(stderr, "[Fallout]   ", status, "  ", name)
     end
     return nothing
 end
@@ -1392,7 +1392,7 @@ function merge_maps(out::AbstractString, inputs::AbstractVector{<:AbstractString
     buffer = IOBuffer()
     TOML.print(buffer, merged; sorted = true)
     write(out, take!(buffer))
-    println(stderr, "[TestImpactAnalysis] merged ", length(inputs), " maps into ", out, ": ", length(names), " testsets")
+    println(stderr, "[Fallout] merged ", length(inputs), " maps into ", out, ": ", length(names), " testsets")
     return nothing
 end
 
@@ -1417,7 +1417,7 @@ function option_value(args::AbstractVector{<:AbstractString}, flag::AbstractStri
 end
 
 const USAGE = """
-usage: testimpact.jl COMMAND [options]
+usage: fallout.jl COMMAND [options]
   build   [--map MAP] [--root DIR] [--tests test/runtests.jl] [--suites DIR]
           [--suite-pattern REGEX] [--source src]...
           [--runner test/runtests.jl] [--project .] [--jobs N] [--timeout SECONDS] [--only SUBSTRING]...

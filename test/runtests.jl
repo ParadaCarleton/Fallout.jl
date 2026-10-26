@@ -1,7 +1,7 @@
 # Self-check of the selector on a throwaway git repository with a hand-written map:
 #     julia --startup-file=no --project=. -e 'using Pkg; Pkg.test()'   (from the package's directory)
 using Test
-using TestImpactAnalysis: TestImpactAnalysis, executed_positions, lcov_files, merge_maps, parse_ranges, ranges_text, read_map, retest_pattern, runner_arguments, select_testsets
+using Fallout: Fallout, executed_positions, lcov_files, merge_maps, parse_ranges, ranges_text, read_map, retest_pattern, runner_arguments, select_testsets
 
 const PACKAGE = """
 module P
@@ -86,7 +86,7 @@ function fixture(root::AbstractString)::String
 end
 
 "The selection after replacing `old` by `new` in `path` (working tree, not committed)."
-function selected_after(root::AbstractString, path::AbstractString, old::AbstractString, new::AbstractString)::TestImpactAnalysis.Selection
+function selected_after(root::AbstractString, path::AbstractString, old::AbstractString, new::AbstractString)::Fallout.Selection
     original = read(joinpath(root, path), String)
     @assert occursin(old, original)
     write_file(root, path, replace(original, old => new))
@@ -98,7 +98,7 @@ function selected_after(root::AbstractString, path::AbstractString, old::Abstrac
     end
 end
 
-names_in(selection::TestImpactAnalysis.Selection)::Vector{String} = sort(unique(first.(selection.reasons)))
+names_in(selection::Fallout.Selection)::Vector{String} = sort(unique(first.(selection.reasons)))
 
 @testset "selector" begin
     root = mktempdir()
@@ -233,7 +233,7 @@ function printed_by_main(args::AbstractVector{<:AbstractString})::String
     path = tempname()
     open(path, "w") do io
         redirect_stdout(io) do
-            TestImpactAnalysis.main(args)
+            Fallout.main(args)
         end
     end
     return read(path, String)
@@ -290,7 +290,7 @@ end
 end
 
 @testset "macro names are identifiers on every supported Julia" begin
-    items = TestImpactAnalysis.source_items("@testset \"t\" begin\n    @check x\nend\n", "macros.jl")
+    items = Fallout.source_items("@testset \"t\" begin\n    @check x\nend\n", "macros.jl")
     @test only(items).kind == :testset
     @test "check" in only(items).mentions
 end
@@ -372,7 +372,7 @@ end
 end
 
 @testset "environment files of the package and the runner's project select the full suite" begin
-    dependency_file = TestImpactAnalysis.dependency_file
+    dependency_file = Fallout.dependency_file
     @test dependency_file("Project.toml", ["src"], ".")
     @test dependency_file("Manifest-v1.12.toml", ["src"], ".")
     @test dependency_file("pkg/Project.toml", ["pkg/src"], ".")
@@ -383,7 +383,7 @@ end
 end
 
 @testset "path options take the form git reports paths in" begin
-    path_option = TestImpactAnalysis.path_option
+    path_option = Fallout.path_option
     @test path_option("./test/") == "test"
     @test path_option("./test/runtests.jl") == "test/runtests.jl"
     @test path_option(".") == "."

@@ -1,6 +1,6 @@
-# TestImpactAnalysis.jl
+# Fallout.jl
 
-[![CI](https://github.com/ParadaCarleton/TestImpactAnalysis.jl/actions/workflows/CI.yml/badge.svg)](https://github.com/ParadaCarleton/TestImpactAnalysis.jl/actions/workflows/CI.yml)
+[![CI](https://github.com/ParadaCarleton/Fallout.jl/actions/workflows/CI.yml/badge.svg)](https://github.com/ParadaCarleton/Fallout.jl/actions/workflows/CI.yml)
 
 Test impact analysis (regression test selection) for Julia packages: after an edit, run
 only the testsets the edit can affect. It uses only the standard library and never loads
@@ -21,25 +21,25 @@ a code change in one selects the suite, and a testset in one is part of the suit
 Install it into an environment of its own, so it never touches the package under test:
 
 ```
-julia --project=tia -e 'using Pkg; Pkg.add(url = "https://github.com/ParadaCarleton/TestImpactAnalysis.jl")'
+julia --project=tia -e 'using Pkg; Pkg.add(url = "https://github.com/ParadaCarleton/Fallout.jl")'
 ```
 
 Then run a command from the root of the package whose tests you want to select:
 
 ```
-julia --startup-file=no --project=tia -e 'using TestImpactAnalysis; main(ARGS)' COMMAND [options]
+julia --startup-file=no --project=tia -e 'using Fallout; main(ARGS)' COMMAND [options]
 ```
 
-From a clone, `julia --startup-file=no bin/testimpact.jl COMMAND [options]` does the same.
+From a clone, `julia --startup-file=no bin/fallout.jl COMMAND [options]` does the same.
 A typical session maps the suite once, then selects for each branch:
 
 ```
-testimpact build --source src --jobs 8        # writes test-impact-map.toml
-testimpact select --trunk main                # testsets this branch can affect
-testimpact run --trunk main                   # select, then run them
+fallout build --source src --jobs 8        # writes test-impact-map.toml
+fallout select --trunk main                # testsets this branch can affect
+fallout run --trunk main                   # select, then run them
 ```
 
-(`testimpact` standing for either command line above.)
+(`fallout` standing for either command line above.)
 
 | Command | What it does |
 | --- | --- |
@@ -80,9 +80,9 @@ so they share a commit, then joined:
 
 ```
 for k in 1 2 3 4; do
-  testimpact.jl build --source src --jobs 8 --shard $k/4 --map shard-$k-map.toml
+  fallout.jl build --source src --jobs 8 --shard $k/4 --map shard-$k-map.toml
 done
-testimpact.jl merge --map map.toml --in shard-1-map.toml --in shard-2-map.toml ...
+fallout.jl merge --map map.toml --in shard-1-map.toml --in shard-2-map.toml ...
 ```
 
 - In each shard the smallest testset runs alone first, so the coverage-flagged
