@@ -150,7 +150,12 @@ function coverage_root()::String
     options = Base.JLOptions()
     # fatou-ignore discouraged-function: Julia owns this option string for the whole session
     tracked = options.tracked_path == C_NULL ? "" : unsafe_string(options.tracked_path)
-    if options.code_coverage == 0 || isempty(tracked)
+    return tracked_root(options.code_coverage, tracked)
+end
+
+"`tracked`, the directory coverage at `level` tracks; an error when coverage tracks no directory."
+function tracked_root(level::Integer, tracked::T)::T where {T <: AbstractString}
+    if level == 0 || isempty(tracked)
         error(
             "units track code by coverage: start Julia with `--code-coverage=@DIR`, DIR holding the package and its tests, ",
             "or pass `unit_cache(; root = DIR, track = :sources)` to depend on every file under DIR",
@@ -262,8 +267,7 @@ function method_owners(root::AbstractString, items::AbstractVector{Digested})::D
 end
 
 "The method instances an edge of compiled code names."
-edge_targets(edge::Core.CodeInstance)::Vector{Core.MethodInstance} = edge_targets(edge.def)
-edge_targets(edge::Core.ABIOverride)::Vector{Core.MethodInstance} = edge_targets(edge.def)
+edge_targets(edge::Union{Core.CodeInstance, Core.ABIOverride})::Vector{Core.MethodInstance} = edge_targets(edge.def)
 edge_targets(edge::Core.MethodInstance)::Vector{Core.MethodInstance} = [edge]
 edge_targets(edge::Any)::Vector{Core.MethodInstance} = Core.MethodInstance[]
 
@@ -301,7 +305,9 @@ function compiled_closure(
         return seen
     end
     grown = union(seen, frontier)
-    callees = Set(callee for instance in frontier for callee in compiled_callees(instance))
+    callees = Set{Core.MethodInstance}(
+        callee for instance in frontier for callee in compiled_callees(instance)
+    )
     return compiled_closure(setdiff(callees, grown), grown)
 end
 
@@ -319,7 +325,7 @@ function compiled_items(cache::UnitCache, ran::AbstractVector{Digested})::Vector
         )
         owners = method_owners(cache.root, cache.items)
     end
-    roots = Set(
+    roots = Set{Core.MethodInstance}(
         instance
             for (method, entry) in owners
             if (entry.path, entry.item.first) in started

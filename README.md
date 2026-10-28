@@ -75,7 +75,7 @@ Options (`--root` defaults to the current directory, `--map` to `ROOT/test-impac
 | `--shard K/N` | build | Map shard K of N |
 | `--commit REV` | build | Commit recorded in the map (default `git rev-parse HEAD`) |
 | `--env NAME=VALUE` | build | Environment variable for each testset process; repeatable |
-| `--in MAP` | merge | A shard map; repeatable |
+| `--in MAP` | merge | A shard map, relative to `--root` like `--map`; repeatable |
 | `--base REV`, `--trunk REV`, `--to REV` | select, run | Compare `--base` (default `merge-base(TRUNK, TIP)`, TRUNK default `main`) with `--to` (default the working tree, untracked files included; TIP is then `HEAD`) |
 
 ## Build the map

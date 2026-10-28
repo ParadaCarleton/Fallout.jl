@@ -2120,7 +2120,7 @@ function main(args::AbstractVector{<:AbstractString})::Nothing
         return nothing
     end
     if command == "merge"
-        merge_maps(map_path, option_values(args, "--in"))
+        merge_maps(map_path, abspath.(root, option_values(args, "--in")))
         return nothing
     end
     if command in ("select", "run")

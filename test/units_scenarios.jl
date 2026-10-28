@@ -241,6 +241,27 @@ if PHASE == "coverage"
         rm(nest)
         @test_throws "`:coverage` or `:sources`" unit_cache(; root = TREE, track = :lines)
         @test_throws "not a directory" unit_cache(; root = joinpath(TREE, "missing"))
+        @test Fallout.default_root(:coverage) == Fallout.coverage_root()
+        @test Fallout.default_root(:sources) == pwd()
+    end
+
+    @testset "units never reuse code their cache did not parse" begin
+        cache = load(package_source())
+        late = joinpath(TREE, "src", "Late.jl")
+        write(late, "module Late\nstamp(config) = time_ns()\nend\n")
+        Base.include(Main, late)
+        stamp = latest(latest(Main, :Late), :stamp)
+        stamps = [
+            @test_logs (:warn, r"did not parse") match_mode = :any Base.invokelatest(
+                unit,
+                stamp,
+                cache,
+                (; seed = 1),
+            )
+                for _ in 1:2
+        ]
+        @test allunique(stamps)
+        rm(late)
     end
 
     @testset "the environment is part of a unit's key" begin

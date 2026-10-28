@@ -604,6 +604,78 @@ end
 end
 
 """
+A runner that runs the top-level testsets of the fixture's test files whose `/name`
+matches the regex `ARGS[1]`, as ReTest does.
+"""
+const RUNNER = """
+using Test
+include(joinpath(@__DIR__, "..", "src", "P.jl"))
+const PATTERN = Regex(only(ARGS))
+const FILES = ("runtests.jl", "slow.jl")
+for expression in (part for file in FILES for part in Meta.parseall(read(joinpath(@__DIR__, file), String)).args)
+    if Meta.isexpr(expression, :macrocall) && first(expression.args) == Symbol("@testset")
+        _, _, name = expression.args
+        if !occursin(PATTERN, "/" * name)
+            continue
+        end
+    end
+    Core.eval(Main, expression)
+end
+"""
+
+"The text `command` prints to standard output when run through `Fallout.main`."
+function printed(command::AbstractVector{<:AbstractString})::String
+    path, io = mktemp()
+    # fatou-ignore discouraged-function: this is the `redirect_stdout(f, io)` form, with a named `f`
+    redirect_stdout(Fallout.main ∘ Returns(command), io)
+    close(io)
+    return read(path, String)
+end
+
+@testset "build, merge, select and run a real repository" begin
+    root = mktempdir()
+    fixture(root)
+    write_file(root, "test/retest.jl", RUNNER)
+    tests = read(joinpath(root, "test/runtests.jl"), String)
+    looped = "for round in 1:1\n    @testset \"looped\" begin end\nend\n"
+    write_file(root, "test/runtests.jl", tests * looped)
+    write_file(root, "test/slow.jl", "@testset \"slow\" begin\n    sleep(600)\nend\n")
+    write_file(root, "test/computed.jl", "using Test\n@testset \"\$(1 + 1)\" begin end\n")
+    git_run(root, "add", "-A")
+    git_run(root, "commit", "-q", "-m", "runner")
+    common = ["--root", root, "--runner", "test/retest.jl", "--env", "FALLOUT_CHECK=1"]
+    Fallout.main(["build", common..., "--map", "built.toml", "--jobs", "4", "--timeout", "60", "--only", "runs", "--only", "uses", "--only", "helper"])
+    built = read_map(joinpath(root, "built.toml"))
+    @test built.commit == strip(git_run(root, "rev-parse", "HEAD"))
+    @test built.testsets["helper user"].status == "no-coverage"
+    @test all(built.testsets[name].status == "ok" for name in ("runs f", "runs g", "uses S"))
+    @test built.testsets["runs f"].functions == Dict("src/P.jl" => Set(["f(x)"]))
+    @test built.testsets["uses S"].functions == Dict("src/P.jl" => Set(["h(s::S)"]))
+
+    for shard in ("1/2", "2/2")
+        Fallout.main(["build", common..., "--map", "shard-$(first(shard)).toml", "--shard", shard, "--jobs", "1", "--only", "r", "--only", "u", "--commit", built.commit])
+    end
+    Fallout.main(["merge", "--root", root, "--map", "merged.toml", "--in", "shard-1.toml", "--in", "shard-2.toml"])
+    merged = read_map(joinpath(root, "merged.toml"))
+    @test Dict(name => (testset.status, testset.functions) for (name, testset) in merged.testsets) ==
+        Dict(name => (testset.status, testset.functions) for (name, testset) in built.testsets)
+    @test_throws "more than one shard" Fallout.main(["merge", "--root", root, "--map", "twice.toml", "--in", "shard-1.toml", "--in", "shard-1.toml"])
+
+    Fallout.main(["build", common..., "--map", "slow.toml", "--tests", "test/slow.jl", "--timeout", "1"])
+    @test read_map(joinpath(root, "slow.toml")).testsets["slow"].status == "timeout"
+    @test_throws "no testset matches" Fallout.main(["build", common..., "--only", "absent"])
+    @test_throws "computed name" Fallout.main(["build", common..., "--tests", "test/computed.jl"])
+
+    write_file(root, "src/P.jl", replace(PACKAGE, "return 2x" => "return x + x"))
+    selection = ["--root", root, "--map", "built.toml", "--base", "HEAD"]
+    @test occursin("pattern: ", printed(["select", selection...]))
+    @test occursin("runs g", printed(["run", selection...]))
+    @test_throws "is not a git checkout" Fallout.main(["select", "--root", joinpath(root, "src"), "--map", "../built.toml", "--base", "HEAD"])
+    @test_throws "usage" Fallout.main(String[])
+    @test_throws "needs a value" Fallout.main(["build", "--map"])
+end
+
+"""
 Run the unit scenarios' `phase` in a child process. It tracks coverage of this package,
 which holds `tree`, so the child's runs of Fallout count toward the package's coverage.
 """
@@ -622,4 +694,7 @@ end
     message = IOBuffer()
     @test !success(pipeline(uncovered; stderr = message))
     @test occursin("--code-coverage=@DIR", String(take!(message)))
+    @test_throws "--code-coverage=@DIR" Fallout.tracked_root(0, "")
+    @test_throws "--code-coverage=@DIR" Fallout.tracked_root(1, "")
+    @test Fallout.tracked_root(1, tree) == tree
 end
