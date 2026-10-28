@@ -114,6 +114,11 @@ speed; a `Dict`-heavy loop ran 35% slower; a tight loop over small inlined funct
 many times slower, because the counters block the optimizations that removed the loop.
 Measure your own units before choosing.
 
+From Julia 1.14, coverage records whether a line ran, not how often. There a unit clears
+the coverage counters while it computes, then marks again every line that ran before it. A
+coverage report of the same run keeps every line it would have, though such a line's count
+can drop to 1.
+
 Under `:sources`, any edit to code under `root` recomputes every unit, and so does added
 code. Blanks, comments and docstrings still do not count.
 

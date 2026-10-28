@@ -194,6 +194,13 @@ if PHASE == "coverage"
         end
     end
 
+    @testset "units record code that ran before them" begin
+        cache = load(package_source())
+        Base.invokelatest(latest(latest(Main, :P), :fit), (; seed = 11))
+        @test computed(cache, 11)
+        @test computed(load(package_source(helper = "helper(x) = x + 2K")), 11)
+    end
+
     @testset "units recompute a damaged stored result" begin
         cache = load(package_source())
         place = joinpath(

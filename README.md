@@ -159,6 +159,9 @@ move line numbers but not headers, so a map stays valid while the code around it
 - Coverage counts lines, not specializations. A `@generated` body, or code run only at
   compile time, is covered when it is generated. Code inlined into a dependency's
   precompiled image is not covered at all.
+- From Julia 1.14, evaluating a definition counts its line as executed. A runner that
+  `include`s the package's files, instead of loading the package with `using`, marks every
+  function it defines as executed by every testset.
 - Names are matched as identifiers, with no scope. A local variable that shares a
   changed global's name selects too much. A name reached only through `getfield`,
   `@eval` interpolation or a string selects too little.

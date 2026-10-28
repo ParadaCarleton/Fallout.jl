@@ -44,7 +44,7 @@ struct UnitCache
     owners::Dict{Method, Digested}
 end
 
-"One line of an LCOV tracefile: its file relative to the root, its number and its count."
+"One line of an LCOV tracefile: its file as Julia names it, its number and its count."
 struct CoveredLine
     file::String
     line::Int
@@ -375,41 +375,70 @@ function holds(cache::UnitCache, record::UnitRecord)::Bool
         all(get(cache.names, name, "") == digest for (name, digest) in record.names)
 end
 
-"Every line of one LCOV record whose file lies under `root`."
-function record_counts(record::AbstractString, root::AbstractString)::Vector{CoveredLine}
+"The lines of one LCOV record that ran."
+function record_lines(record::AbstractString)::Vector{CoveredLine}
     rows = split(record, '\n')
     files = [chopprefix(row, "SF:") for row in rows if startswith(row, "SF:")]
     if isempty(files)
         return CoveredLine[]
     end
-    file = relative_path(root, String(only(files)))
     counts = [
         parse.(Int, first(split(chopprefix(row, "DA:"), ','), 2))
             for row in rows
             if startswith(row, "DA:")
     ]
-    return [CoveredLine(file, line, count) for (line, count) in counts if !isempty(file)]
+    return [CoveredLine(String(only(files)), line, count) for (line, count) in counts if count > 0]
 end
 
-"The execution count of every covered line under `root` so far, keyed by `(file, line)`."
-function coverage_counts(root::AbstractString)::Dict{Tuple{String, Int}, Int}
+"Every line that ran since the coverage counters were last cleared."
+function coverage_lines()::Vector{CoveredLine}
     tracefile = tempname() * ".info"
     ccall(:jl_write_coverage_data, Cvoid, (Cstring,), tracefile)
     text = read(tracefile, String)
     rm(tracefile)
-    return Dict(
-        (covered.file, covered.line) => covered.count
-            for record in split(text, "end_of_record")
-            for covered in record_counts(record, root)
-    )
+    return [covered for record in split(text, "end_of_record") for covered in record_lines(record)]
 end
 
 """
-The record of the items holding a line whose count grew from `before` to `after`. A file
-the cache did not parse records the digest `unparsed`, which never holds.
+The value of `compute(config)`, the lines it ran and its time. Before Julia 1.14 these are
+the lines whose count grew. From 1.14 coverage records whether a line ran, not how often: the
+counters are cleared first, and the lines that ran earlier are visited again afterward, which
+keeps them in the process's own coverage report. (Before 1.14, clearing detaches compiled code
+from its counters.)
 """
-function ran_record(cache::UnitCache, before::AbstractDict, after::AbstractDict)::UnitRecord
-    lines = [key for (key, count) in after if count > get(before, key, 0)]
+function covered_run(compute::Any, config::Any)::Tuple{Any, Vector{CoveredLine}, Float64}
+    earlier = coverage_lines()
+    if VERSION < v"1.14.0-"
+        timed = @timed compute(config)
+        return (timed.value, setdiff(coverage_lines(), earlier), timed.time)
+    end
+    # COV_EXCL_START: the coverage job runs a Julia older than 1.14; the `pre` job tests this.
+    ccall(:jl_clear_coverage_data, Cvoid, ())
+    try
+        timed = @timed compute(config)
+        return (timed.value, coverage_lines(), timed.time)
+    finally
+        for covered in earlier
+            ccall(
+                :jl_coverage_visit_line,
+                Cvoid,
+                (Cstring, Csize_t, Cint),
+                covered.file,
+                sizeof(covered.file),
+                covered.line,
+            )
+        end
+    end
+    # COV_EXCL_STOP
+end
+
+"""
+The record of the items holding a line in `ran`. A file under the root that the cache did
+not parse records the digest `unparsed`, which never holds.
+"""
+function ran_record(cache::UnitCache, ran::AbstractVector{CoveredLine})::UnitRecord
+    located = [(relative_path(cache.root, covered.file), covered.line) for covered in ran]
+    lines = [(path, line) for (path, line) in located if !isempty(path)]
     covered = [
         entry
             for entry in cache.items
@@ -585,13 +614,8 @@ function run_compute(compute::Any, cache::UnitCache, config::Any)::Tuple{
     end
     lock(COMPUTING)
     try
-        before = coverage_counts(cache.root)
-        timed = @timed compute(config)
-        return (
-            timed.value,
-            ran_record(cache, before, coverage_counts(cache.root)),
-            timed.time,
-        )
+        result, ran, seconds = covered_run(compute, config)
+        return (result, ran_record(cache, ran), seconds)
     finally
         unlock(COMPUTING)
     end

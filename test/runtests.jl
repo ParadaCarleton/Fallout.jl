@@ -626,6 +626,7 @@ end
     @test described("@time @testset \"timed\" begin end") == ["testset timed timed"]
     @test described("@testset NAME begin end") == ["testset  "]
     @test isempty(described("# only a comment\n"))
+    @test only(Fallout.source_items("module P\nmodule A\ng() = 1\nend\nend", "q.jl")).scope == "P.A"
     @test_throws "cannot parse q.jl" described("f(x = \n")
 
     items = Fallout.source_items(
@@ -651,7 +652,7 @@ matches the regex `ARGS[1]`, as ReTest does.
 """
 const RUNNER = """
 using Test
-include(joinpath(@__DIR__, "..", "src", "P.jl"))
+using P
 const PATTERN = Regex(only(ARGS))
 const FILES = ("runtests.jl", "slow.jl")
 for expression in (part for file in FILES for part in Meta.parseall(read(joinpath(@__DIR__, file), String)).args)
@@ -677,6 +678,8 @@ end
 @testset "build, merge, select and run a real repository" begin
     root = mktempdir()
     fixture(root)
+    project = "name = \"P\"\nuuid = \"f0000000-0000-4000-8000-000000000001\"\n"
+    write_file(root, "Project.toml", project)
     write_file(root, "test/retest.jl", RUNNER)
     tests = read(joinpath(root, "test/runtests.jl"), String)
     looped = "for round in 1:1\n    @testset \"looped\" begin end\nend\n"
@@ -714,7 +717,7 @@ end
     selection = ["--root", root, "--map", "built.toml", "--base", "HEAD"]
     @test occursin("pattern: ", printed(["select", selection...]))
     @test occursin("runs g", printed(["run", selection...]))
-    write_file(root, "Project.toml", "name = \"P\"\nversion = \"0.1.0\"\n")
+    write_file(root, "Project.toml", project * "version = \"0.1.0\"\n")
     @test occursin("FULL SUITE: Project.toml", printed(["select", selection...]))
     @test_throws "is not a git checkout" Fallout.main(["select", "--root", joinpath(root, "src"), "--map", "../built.toml", "--base", "HEAD"])
     @test_throws "usage" Fallout.main(String[])

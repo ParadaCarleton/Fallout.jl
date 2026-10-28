@@ -281,7 +281,9 @@ function node_items(
     kind = JS.kind(node)
     if kind == K"module"
         parts = JS.children(node)
-        inner = join(filter(!isempty, [scope, String(JS.sourcetext(first(parts)))]), '.')
+        # Julia 1.14 puts a syntax `VERSION` node before the name.
+        name = only(part for part in parts if JS.kind(part) == K"Identifier")
+        inner = join(filter(!isempty, [scope, String(JS.sourcetext(name))]), '.')
         return reduce(
             vcat,
             (node_items(part, 0:-1, inner) for part in JS.children(last(parts)));
