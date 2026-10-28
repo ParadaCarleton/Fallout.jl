@@ -1,2 +1,4 @@
 Manifest.toml
 .claude/
+docs/build/
+docs/src/index.md
