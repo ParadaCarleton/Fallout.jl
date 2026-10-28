@@ -7,17 +7,18 @@ on:
   workflow_dispatch:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
 jobs:
   test:
     name: Julia ${{ matrix.version }} - ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 60
+    continue-on-error: ${{ matrix.version == 'pre' }}
     strategy:
       fail-fast: false
       matrix:
-        # Project.toml allows julia 1.12 and later 1.x: test the oldest and the newest release.
-        version: ['1.12', '1']
+        # Project.toml allows julia 1.12 and later 1.x: test the oldest, the newest and the prerelease.
+        version: ['1.12', '1', 'pre']
         os: [ubuntu-latest]
     steps:
       - uses: actions/checkout@v4
@@ -27,3 +28,36 @@ jobs:
       - uses: julia-actions/cache@v2
       - uses: julia-actions/julia-buildpkg@v1
       - uses: julia-actions/julia-runtest@v1
+      - uses: julia-actions/julia-processcoverage@v1
+      - name: Require 100% line coverage
+        if: matrix.version == '1'
+        run: |
+          sudo apt-get install -y lcov
+          lcov --summary lcov.info 2>&1 | tee summary.txt
+          grep -Eq 'lines\.*: 100\.0%' summary.txt
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - run: fatou lint --color never src test
+  corset:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+      - uses: julia-actions/cache@v2
+      - run: julia --project=@corset -e 'using Pkg; Pkg.add(url = "https://github.com/ParadaCarleton/Corset.jl")'
+      - run: julia --project=@corset -e 'using Corset; exit(Corset.main(ARGS))' -- check . --no-load --deny-warnings
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+      - uses: fredrikekre/runic-action@v1
+        with:
+          version: '1'
