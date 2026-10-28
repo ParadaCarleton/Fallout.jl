@@ -51,10 +51,10 @@ function git_run(root::AbstractString, args::AbstractString...)::String
 end
 
 function write_file(
-    root::AbstractString,
-    path::AbstractString,
-    text::AbstractString,
-)::Nothing
+        root::AbstractString,
+        path::AbstractString,
+        text::AbstractString,
+    )::Nothing
     mkpath(dirname(joinpath(root, path)))
     write(joinpath(root, path), text)
     return nothing
@@ -101,11 +101,11 @@ end
 
 "The selection after replacing `old` by `new` in `path` (working tree, not committed)."
 function selected_after(
-    root::AbstractString,
-    path::AbstractString,
-    old::AbstractString,
-    new::AbstractString,
-)::Fallout.Selection
+        root::AbstractString,
+        path::AbstractString,
+        old::AbstractString,
+        new::AbstractString,
+    )::Fallout.Selection
     original = read(joinpath(root, path), String)
     @assert occursin(old, original)
     write_file(root, path, replace(original, old => new))
@@ -117,27 +117,37 @@ function selected_after(
     end
 end
 
-names_in(selection::Fallout.Selection)::Vector{String} = sort(unique(
-    first.(selection.reasons),
-))
+names_in(selection::Fallout.Selection)::Vector{String} = sort(
+    unique(
+        first.(selection.reasons),
+    )
+)
 
 @testset "selector" begin
     root = mktempdir()
     fixture(root)
 
     @test names_in(selected_after(root, "src/P.jl", "x + 1", "x + 2")) == ["runs f"]
-    @test isempty(names_in(selected_after(
-        root,
-        "src/P.jl",
-        "\"A thing.\"",
-        "\"Another thing.\"",
-    )))
-    @test isempty(names_in(selected_after(
-        root,
-        "src/P.jl",
-        "f(x) = x + 1",
-        "f(x) = x + 1 # note",
-    )))
+    @test isempty(
+        names_in(
+            selected_after(
+                root,
+                "src/P.jl",
+                "\"A thing.\"",
+                "\"Another thing.\"",
+            )
+        )
+    )
+    @test isempty(
+        names_in(
+            selected_after(
+                root,
+                "src/P.jl",
+                "f(x) = x + 1",
+                "f(x) = x + 1 # note",
+            )
+        )
+    )
 
     struct_change = selected_after(root, "src/P.jl", "a::Int", "a::Float32")
     @test names_in(struct_change) == ["uses S"]
@@ -155,19 +165,23 @@ names_in(selection::Fallout.Selection)::Vector{String} = sort(unique(
     @test isempty(names_in(unused_change))
     @test length(unused_change.uncovered) == 1
 
-    @test names_in(selected_after(
-        root,
-        "test/runtests.jl",
-        "P.g(1) == 2",
-        "P.g(2) == 4",
-    )) ==
+    @test names_in(
+        selected_after(
+            root,
+            "test/runtests.jl",
+            "P.g(1) == 2",
+            "P.g(2) == 4",
+        )
+    ) ==
         ["runs g"]
-    @test names_in(selected_after(
-        root,
-        "test/runtests.jl",
-        "helper() = 1",
-        "helper() = 2",
-    )) ==
+    @test names_in(
+        selected_after(
+            root,
+            "test/runtests.jl",
+            "helper() = 1",
+            "helper() = 2",
+        )
+    ) ==
         ["helper user"]
 
     full = selected_after(
@@ -184,12 +198,16 @@ names_in(selection::Fallout.Selection)::Vector{String} = sort(unique(
     # A line break between tokens can change the code: `return\n2x` returns nothing.
     @test names_in(selected_after(root, "src/P.jl", "return 2x", "return\n2x")) ==
         ["runs g"]
-    @test isempty(names_in(selected_after(
-        root,
-        "src/P.jl",
-        "    return 2x",
-        "\n    return 2x",
-    )))
+    @test isempty(
+        names_in(
+            selected_after(
+                root,
+                "src/P.jl",
+                "    return 2x",
+                "\n    return 2x",
+            )
+        )
+    )
     operator = selected_after(
         root,
         "src/P.jl",
@@ -203,12 +221,16 @@ end
     root = mktempdir()
     commit = fixture(root)
     # `h` mentions `S`: an import of `S` reaches it only by dropping the name.
-    @test isempty(names_in(selected_after(
-        root,
-        "src/P.jl",
-        "module P\n",
-        "module P\nusing Q: S\n",
-    )))
+    @test isempty(
+        names_in(
+            selected_after(
+                root,
+                "src/P.jl",
+                "module P\n",
+                "module P\nusing Q: S\n",
+            )
+        )
+    )
 
     write_file(root, "src/P.jl", replace(PACKAGE, "module P\n" => "module P\nusing Q: S\n"))
     git_run(root, "commit", "-q", "-am", "import S")
@@ -219,12 +241,16 @@ end
         replace(read(joinpath(root, "map.toml"), String), commit => imported),
     )
     @test names_in(selected_after(root, "src/P.jl", "using Q: S\n", "")) == ["uses S"]
-    @test isempty(names_in(selected_after(
-        root,
-        "src/P.jl",
-        "using Q: S\n",
-        "using Q: S, T\n",
-    )))
+    @test isempty(
+        names_in(
+            selected_after(
+                root,
+                "src/P.jl",
+                "using Q: S\n",
+                "using Q: S, T\n",
+            )
+        )
+    )
 end
 
 @testset "pattern and coverage records" begin
@@ -405,13 +431,13 @@ end
     write_file(root, "test/helpers.jl", helpers)
     tests = replace(TESTS, "using Test\n" => "using Test\ninclude(\"helpers.jl\")\n") *
         """
-    @testset "scans" begin
-        @test !isempty(scan_sources())
-    end
-    @testset "wraps" begin
-        @test Wrapped(1).value == 1
-    end
-    """
+        @testset "scans" begin
+            @test !isempty(scan_sources())
+        end
+        @testset "wraps" begin
+            @test Wrapped(1).value == 1
+        end
+        """
     write_file(root, "test/runtests.jl", tests)
     git_run(root, "add", "-A")
     git_run(root, "commit", "-q", "-m", "helpers")
@@ -422,11 +448,13 @@ end
         replace(PACKAGE, "unused(x) = x" => "unused(x) = x # note\nother(x) = x"),
     )
     selection = select_testsets(root, read_map(joinpath(root, "map.toml")), base, "")
-    static = sort([
-        first(pair)
-        for pair in selection.reasons
-        if startswith(last(pair), "static analysis")
-    ])
+    static = sort(
+        [
+            first(pair)
+                for pair in selection.reasons
+                if startswith(last(pair), "static analysis")
+        ]
+    )
     @test static == ["scans"]
 end
 
@@ -502,19 +530,25 @@ end
     edited = selected_after(root, "test/a/test_f.jl", "P.f(1) == 2", "P.f(2) == 3")
     @test names_in(edited) == ["a/test_f.jl"]
     @test any(occursin("edited suite", last(pair)) for pair in edited.reasons)
-    @test isempty(names_in(selected_after(
-        root,
-        "test/a/test_f.jl",
-        "using Test\n",
-        "using Test # note\n",
-    )))
+    @test isempty(
+        names_in(
+            selected_after(
+                root,
+                "test/a/test_f.jl",
+                "using Test\n",
+                "using Test # note\n",
+            )
+        )
+    )
 
-    @test names_in(selected_after(
-        root,
-        "test/support/helper.jl",
-        "helper() = 1",
-        "helper() = 2",
-    )) ==
+    @test names_in(
+        selected_after(
+            root,
+            "test/support/helper.jl",
+            "helper() = 1",
+            "helper() = 2",
+        )
+    ) ==
         ["test_g.jl"]
 
     write_file(root, "test/test_new.jl", "@testset \"new\" begin\nend\n")
@@ -535,12 +569,14 @@ end
     @test !isempty(runner.full)
 
     # A helper the suite runs only through an include, and a testset inside it, belong to the suite.
-    @test names_in(selected_after(
-        root,
-        "test/support/setup.jl",
-        "setup() = 1",
-        "setup() = 2",
-    )) ==
+    @test names_in(
+        selected_after(
+            root,
+            "test/support/setup.jl",
+            "setup() = 1",
+            "setup() = 2",
+        )
+    ) ==
         ["test_h.jl"]
 
     @test runner_arguments(true, ["a/test_f.jl", "test_g.jl"]) ==
@@ -567,15 +603,139 @@ end
     @test path_option("pkg/../test") == "test"
 end
 
-"Run the unit scenarios' `phase` in a child process tracking coverage of `tree`."
+"Each top-level item of `text` as `kind name key,key`."
+function described(text::AbstractString)::Vector{String}
+    return [
+        string(item.kind, " ", item.name, " ", join(item.keys, ','))
+            for item in Fallout.source_items(text, "q.jl")
+    ]
+end
+
+@testset "the parser names every kind of top-level item" begin
+    @test described("x ⊕ y = x + y") == ["function ⊕ ⊕"]
+    @test described("(s::S)(y) = y") == ["function S S"]
+    @test described("(::S{T})(y) where {T} = y") == ["function S S"]
+    @test described("f(x)::Int = 1") == ["function f f"]
+    @test described("const a, (b, c) = 1, (2, 3)") == ["binding  a,b,c"]
+    @test described("data = [1]") == ["binding  data"]
+    @test described("A.field = 1") == ["binding  "]
+    @test described("macro twice(x)\n    :(2 * \$x)\nend") == ["binding twice twice"]
+    @test described("@inline @noinline f(x) = x") == ["function f f"]
+    @test described("@marker") == ["other  "]
+    @test described("42") == ["other  "]
+    @test described("@time @testset \"timed\" begin end") == ["testset timed timed"]
+    @test described("@testset NAME begin end") == ["testset  "]
+    @test isempty(described("# only a comment\n"))
+    @test only(Fallout.source_items("module P\nmodule A\ng() = 1\nend\nend", "q.jl")).scope == "P.A"
+    @test_throws "cannot parse q.jl" described("f(x = \n")
+
+    items = Fallout.source_items(
+        "struct S end\nconst V = Vector{S}\nconst W = V\nk(v::W) = 1\ninclude(\"a.jl\")",
+        "q.jl",
+    )
+    located = [Fallout.Located("q.jl", item) for item in items if item.kind != :function]
+    @test Fallout.name_closure(Set(["S"]), located) == Set(["S", "V", "W"])
+    @test Fallout.binding_keys(last(items)) == String[]
+    @test Fallout.binding_keys(only(item for item in items if item.kind == :function)) == ["k"]
+    @test ranges_text(Int[]) == ""
+    @test Fallout.path_class("test/data.csv", Set{String}(), "test", ["src"]) == :fixture
+    @test Fallout.parse_file_change("a/n.jl b/n.jl\nnew file mode 100644\n").status == :added
+    @test Fallout.parse_file_change("a/d.jl b/d.jl\ndeleted file mode 100644\n").status == :deleted
+    old = joinpath(mktempdir(), "old.toml")
+    write(old, "[meta]\ncommit = \"abc\"\n")
+    @test_throws "rebuild it with `build`" read_map(old)
+end
+
+"""
+A runner that runs the top-level testsets of the fixture's test files whose `/name`
+matches the regex `ARGS[1]`, as ReTest does.
+"""
+const RUNNER = """
+using Test
+using P
+const PATTERN = Regex(only(ARGS))
+const FILES = ("runtests.jl", "slow.jl")
+for expression in (part for file in FILES for part in Meta.parseall(read(joinpath(@__DIR__, file), String)).args)
+    if Meta.isexpr(expression, :macrocall) && first(expression.args) == Symbol("@testset")
+        _, _, name = expression.args
+        if !occursin(PATTERN, "/" * name)
+            continue
+        end
+    end
+    Core.eval(Main, expression)
+end
+"""
+
+"The text `command` prints to standard output when run through `Fallout.main`."
+function printed(command::AbstractVector{<:AbstractString})::String
+    path, io = mktemp()
+    # fatou-ignore discouraged-function: this is the `redirect_stdout(f, io)` form, with a named `f`
+    redirect_stdout(Fallout.main ∘ Returns(command), io)
+    close(io)
+    return read(path, String)
+end
+
+@testset "build, merge, select and run a real repository" begin
+    root = mktempdir()
+    fixture(root)
+    project = "name = \"P\"\nuuid = \"f0000000-0000-4000-8000-000000000001\"\n"
+    write_file(root, "Project.toml", project)
+    write_file(root, "test/retest.jl", RUNNER)
+    tests = read(joinpath(root, "test/runtests.jl"), String)
+    looped = "for round in 1:1\n    @testset \"looped\" begin end\nend\n"
+    write_file(root, "test/runtests.jl", tests * looped)
+    stubborn = "@testset \"stubborn\" begin\n    Base.exit_on_sigint(false)\n    try\n        sleep(600)\n    catch\n        sleep(600)\n    end\nend\n"
+    write_file(root, "test/slow.jl", "@testset \"slow\" begin\n    sleep(600)\nend\n" * stubborn)
+    write_file(root, "test/computed.jl", "using Test\n@testset \"\$(1 + 1)\" begin end\n")
+    git_run(root, "add", "-A")
+    git_run(root, "commit", "-q", "-m", "runner")
+    common = ["--root", root, "--runner", "test/retest.jl", "--env", "FALLOUT_CHECK=1"]
+    Fallout.main(["build", common..., "--map", "built.toml", "--jobs", "4", "--timeout", "60", "--only", "runs", "--only", "uses", "--only", "helper"])
+    built = read_map(joinpath(root, "built.toml"))
+    @test built.commit == strip(git_run(root, "rev-parse", "HEAD"))
+    @test built.testsets["helper user"].status == "no-coverage"
+    @test all(built.testsets[name].status == "ok" for name in ("runs f", "runs g", "uses S"))
+    @test built.testsets["runs f"].functions == Dict("src/P.jl" => Set(["f(x)"]))
+    @test built.testsets["uses S"].functions == Dict("src/P.jl" => Set(["h(s::S)"]))
+
+    for shard in ("1/2", "2/2")
+        Fallout.main(["build", common..., "--map", "shard-$(first(shard)).toml", "--shard", shard, "--jobs", "1", "--only", "r", "--only", "u", "--commit", built.commit])
+    end
+    Fallout.main(["merge", "--root", root, "--map", "merged.toml", "--in", "shard-1.toml", "--in", "shard-2.toml"])
+    merged = read_map(joinpath(root, "merged.toml"))
+    @test Dict(name => (testset.status, testset.functions) for (name, testset) in merged.testsets) ==
+        Dict(name => (testset.status, testset.functions) for (name, testset) in built.testsets)
+    @test_throws "more than one shard" Fallout.main(["merge", "--root", root, "--map", "twice.toml", "--in", "shard-1.toml", "--in", "shard-1.toml"])
+
+    Fallout.main(["build", common..., "--map", "slow.toml", "--tests", "test/slow.jl", "--timeout", "1"])
+    slow = read_map(joinpath(root, "slow.toml"))
+    @test all(slow.testsets[name].status == "timeout" for name in ("slow", "stubborn"))
+    @test_throws "no testset matches" Fallout.main(["build", common..., "--only", "absent"])
+    @test_throws "computed name" Fallout.main(["build", common..., "--tests", "test/computed.jl"])
+
+    write_file(root, "src/P.jl", replace(PACKAGE, "return 2x" => "return x + x"))
+    selection = ["--root", root, "--map", "built.toml", "--base", "HEAD"]
+    @test occursin("pattern: ", printed(["select", selection...]))
+    @test occursin("runs g", printed(["run", selection...]))
+    write_file(root, "Project.toml", project * "version = \"0.1.0\"\n")
+    @test occursin("FULL SUITE: Project.toml", printed(["select", selection...]))
+    @test_throws "is not a git checkout" Fallout.main(["select", "--root", joinpath(root, "src"), "--map", "../built.toml", "--base", "HEAD"])
+    @test_throws "usage" Fallout.main(String[])
+    @test_throws "needs a value" Fallout.main(["build", "--map"])
+end
+
+"""
+Run the unit scenarios' `phase` in a child process. It tracks coverage of this package,
+which holds `tree`, so the child's runs of Fallout count toward the package's coverage.
+"""
 function unit_phase(tree::AbstractString, phase::AbstractString)::Bool
     script = joinpath(@__DIR__, "units_scenarios.jl")
-    command = `$(Base.julia_cmd()) --startup-file=no --project=$(Base.active_project()) --code-coverage=@$tree $script $tree $phase`
+    command = `$(Base.julia_cmd()) --startup-file=no --project=$(Base.active_project()) --code-coverage=@$(pkgdir(Fallout)) $script $tree $phase`
     return success(pipeline(command; stdout, stderr))
 end
 
 @testset "units reuse results while the code they ran is unchanged" begin
-    tree = mktempdir()
+    tree = mktempdir(pkgdir(Fallout))
     mkpath(joinpath(tree, "src"))
     @test unit_phase(tree, "coverage")
     @test unit_phase(tree, "reuse")
@@ -583,4 +743,7 @@ end
     message = IOBuffer()
     @test !success(pipeline(uncovered; stderr = message))
     @test occursin("--code-coverage=@DIR", String(take!(message)))
+    @test_throws "--code-coverage=@DIR" Fallout.tracked_root(0, "")
+    @test_throws "--code-coverage=@DIR" Fallout.tracked_root(1, "")
+    @test Fallout.tracked_root(1, tree) == tree
 end

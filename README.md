@@ -70,12 +70,12 @@ Options (`--root` defaults to the current directory, `--map` to `ROOT/test-impac
 | `--runner FILE` | build, run | Runner script (default `test/runtests.jl`) |
 | `--project DIR` | build | Julia project the runner runs in, relative to `--root` (default `.`); recorded in the map, so `run` uses it too |
 | `--jobs N` | build | Testsets run at once |
-| `--timeout SECONDS` | build | Per-testset limit; on timeout the process gets SIGINT, so it still writes its coverage |
+| `--timeout SECONDS` | build | Per-testset limit; on timeout the process gets SIGINT, so it still writes its coverage, and SIGKILL if it still runs after another `SECONDS` (at most 120) |
 | `--only SUBSTRING` | build | Map only matching testsets, for a smoke run |
 | `--shard K/N` | build | Map shard K of N |
 | `--commit REV` | build | Commit recorded in the map (default `git rev-parse HEAD`) |
 | `--env NAME=VALUE` | build | Environment variable for each testset process; repeatable |
-| `--in MAP` | merge | A shard map; repeatable |
+| `--in MAP` | merge | A shard map, relative to `--root` like `--map`; repeatable |
 | `--base REV`, `--trunk REV`, `--to REV` | select, run | Compare `--base` (default `merge-base(TRUNK, TIP)`, TRUNK default `main`) with `--to` (default the working tree, untracked files included; TIP is then `HEAD`) |
 
 ## Build the map
@@ -159,6 +159,9 @@ move line numbers but not headers, so a map stays valid while the code around it
 - Coverage counts lines, not specializations. A `@generated` body, or code run only at
   compile time, is covered when it is generated. Code inlined into a dependency's
   precompiled image is not covered at all.
+- From Julia 1.14, evaluating a definition counts its line as executed. A runner that
+  `include`s the package's files, instead of loading the package with `using`, marks every
+  function it defines as executed by every testset.
 - Names are matched as identifiers, with no scope. A local variable that shares a
   changed global's name selects too much. A name reached only through `getfield`,
   `@eval` interpolation or a string selects too little.

@@ -12,17 +12,17 @@ const EXPECTED = joinpath(TREE, "expected.jls")
 
 "The throwaway package's source, with each definition replaceable."
 function package_source(;
-    helper::AbstractString = "helper(x) = x + K",
-    constant::AbstractString = "const K = 3",
-    other::AbstractString = "other(x) = x",
-    extra::AbstractString = "",
-    doc::AbstractString = "Fit one replicate.",
-    loader::AbstractString = "loader() = 1",
-    from::AbstractString = "A",
-    a_g::AbstractString = "1",
-    b_g::AbstractString = "2",
-    matrix::AbstractString = "[1 2]",
-)::String
+        helper::AbstractString = "helper(x) = x + K",
+        constant::AbstractString = "const K = 3",
+        other::AbstractString = "other(x) = x",
+        extra::AbstractString = "",
+        doc::AbstractString = "Fit one replicate.",
+        loader::AbstractString = "loader() = 1",
+        from::AbstractString = "A",
+        a_g::AbstractString = "1",
+        b_g::AbstractString = "2",
+        matrix::AbstractString = "[1 2]",
+    )::String
     return """
     module P
     $constant
@@ -194,6 +194,13 @@ if PHASE == "coverage"
         end
     end
 
+    @testset "units record code that ran before them" begin
+        cache = load(package_source())
+        Base.invokelatest(latest(latest(Main, :P), :fit), (; seed = 11))
+        @test computed(cache, 11)
+        @test computed(load(package_source(helper = "helper(x) = x + 2K")), 11)
+    end
+
     @testset "units recompute a damaged stored result" begin
         cache = load(package_source())
         place = joinpath(
@@ -208,7 +215,7 @@ if PHASE == "coverage"
         @test computed(cache, 7)
         @test all(
             endswith(file, ".jls") || endswith(file, ".toml")
-            for file in readdir(place)
+                for file in readdir(place)
         )
         results = filter(endswith(".jls"), readdir(place; join = true))
         write.(results, "truncated")
@@ -241,6 +248,27 @@ if PHASE == "coverage"
         rm(nest)
         @test_throws "`:coverage` or `:sources`" unit_cache(; root = TREE, track = :lines)
         @test_throws "not a directory" unit_cache(; root = joinpath(TREE, "missing"))
+        @test Fallout.default_root(:coverage) == Fallout.coverage_root()
+        @test Fallout.default_root(:sources) == pwd()
+    end
+
+    @testset "units never reuse code their cache did not parse" begin
+        cache = load(package_source())
+        late = joinpath(TREE, "src", "Late.jl")
+        write(late, "module Late\nstamp(config) = time_ns()\nend\n")
+        Base.include(Main, late)
+        stamp = latest(latest(Main, :Late), :stamp)
+        stamps = [
+            @test_logs (:warn, r"did not parse") match_mode = :any Base.invokelatest(
+                unit,
+                stamp,
+                cache,
+                (; seed = 1),
+            )
+                for _ in 1:2
+        ]
+        @test allunique(stamps)
+        rm(late)
     end
 
     @testset "the environment is part of a unit's key" begin

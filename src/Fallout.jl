@@ -20,8 +20,6 @@ module Fallout
 
 using Dates: Dates
 using SHA: SHA
-using Serialization: serialize, deserialize
-using StableHashTraits: stable_hash
 using TOML: TOML
 import Base.JuliaSyntax as JS
 using Base.JuliaSyntax: @K_str
@@ -123,28 +121,35 @@ function include_paths(node::JS.SyntaxNode)::Vector{String}
     return reduce(vcat, (include_paths(part) for part in parts); init = String[])
 end
 
-"The name a function signature defines (a callable object's methods share `(callable)`)."
+"The name a function signature defines; a callable object's methods are known by its type."
 function callee_name(node::JS.SyntaxNode)::String
     kind = JS.kind(node)
+    parts = JS.children(node)
     if kind == K"call"
-        parts = JS.children(node)
         if JS.is_prefix_call(node)
             return callee_name(first(parts))
         end
-        return String(JS.sourcetext(parts[2]))
+        _, operator = parts
+        return String(JS.sourcetext(operator))
     end
-    if kind in (K"where", K"::", K"curly")
-        return callee_name(first(JS.children(node)))
+    if kind in (K"where", K"curly")
+        return callee_name(first(parts))
     end
-    if kind == K"parens"
-        return "(callable)"
+    if kind == K"::"
+        # `f(x)::T` annotates a return type; `(s::S)(x)` and `(::S)(x)` define methods of `S`.
+        if JS.kind(first(parts)) == K"call"
+            return callee_name(first(parts))
+        end
+        return callee_name(last(parts))
     end
     if kind == K"."
         # `Base.:(==)` and `Base.:+` define `==` and `+`, the names callers mention.
-        return String(lstrip(
-            chopsuffix(chopprefix(last(split(JS.sourcetext(node), '.')), ":("), ")"),
-            ':',
-        ))
+        return String(
+            lstrip(
+                chopsuffix(chopprefix(last(split(JS.sourcetext(node), '.')), ":("), ")"),
+                ':',
+            )
+        )
     end
     return String(JS.sourcetext(node))
 end
@@ -203,8 +208,8 @@ end
 function testset_name(node::JS.SyntaxNode)::String
     names = String[
         literal_string(part)
-        for part in JS.children(node)
-        if JS.kind(part) == K"string"
+            for part in JS.children(node)
+            if JS.kind(part) == K"string"
     ]
     if isempty(names)
         return ""
@@ -246,11 +251,11 @@ function describe_core(core::JS.SyntaxNode)::Tuple{Symbol, String, Vector{String
 end
 
 function build_item(
-    whole::JS.SyntaxNode,
-    description::Tuple{Symbol, String, Vector{String}, String},
-    doc::UnitRange{Int},
-    scope::AbstractString,
-)::Item
+        whole::JS.SyntaxNode,
+        description::Tuple{Symbol, String, Vector{String}, String},
+        doc::UnitRange{Int},
+        scope::AbstractString,
+    )::Item
     kind, name, keys, header = description
     return Item(
         kind,
@@ -269,14 +274,16 @@ function build_item(
 end
 
 function node_items(
-    node::JS.SyntaxNode,
-    doc::UnitRange{Int},
-    scope::AbstractString,
-)::Vector{Item}
+        node::JS.SyntaxNode,
+        doc::UnitRange{Int},
+        scope::AbstractString,
+    )::Vector{Item}
     kind = JS.kind(node)
     if kind == K"module"
         parts = JS.children(node)
-        inner = join(filter(!isempty, [scope, String(JS.sourcetext(first(parts)))]), '.')
+        # Julia 1.14 puts a syntax `VERSION` node before the name.
+        name = only(part for part in parts if JS.kind(part) == K"Identifier")
+        inner = join(filter(!isempty, [scope, String(JS.sourcetext(name))]), '.')
         return reduce(
             vcat,
             (node_items(part, 0:-1, inner) for part in JS.children(last(parts)));
@@ -309,22 +316,22 @@ The syntax tree of a file; a file that does not parse is an error naming `label`
 carrying the parser's message.
 """
 function parse_source(text::AbstractString, label::AbstractString)::JS.SyntaxNode
-    try
-        return JS.parseall(JS.SyntaxNode, text; filename = label)
-    catch exception
-        if exception isa JS.ParseError
-            error("cannot parse ", label, ":\n", sprint(showerror, exception))
-        end
-        rethrow()
+    stream = JS.ParseStream(text)
+    JS.parse!(stream; rule = :all)
+    if JS.any_error(stream)
+        error(
+            "cannot parse ",
+            label,
+            ":\n",
+            sprint(showerror, JS.ParseError(stream; filename = label)),
+        )
     end
+    return JS.build_tree(JS.SyntaxNode, stream; filename = label)
 end
 
 "The top-level items of a file (modules are entered; their own line is not an item)."
 function source_items(text::AbstractString, label::AbstractString)::Vector{Item}
     parts = JS.children(parse_source(text, label))
-    if isnothing(parts)
-        return Item[]
-    end
     return reduce(vcat, (node_items(part, 0:-1, "") for part in parts); init = Item[])
 end
 
@@ -379,11 +386,11 @@ function located_items(snapshot::Snapshot, path::AbstractString)::Vector{Located
 end
 
 function included_items(snapshot::Snapshot, path::AbstractString, item::Item)::Vector{
-    Located,
-}
+        Located,
+    }
     nested = (
         located_items(snapshot, slashed(normpath(joinpath(dirname(path), file))))
-        for file in item.includes
+            for file in item.includes
     )
     return vcat([Located(String(path), item)], reduce(vcat, nested; init = Located[]))
 end
@@ -401,24 +408,26 @@ The files under `dir` whose name matches `pattern`, as `/`-separated paths from 
 tracked files at a revision, every file in the working tree.
 """
 function suite_paths(
-    snapshot::Snapshot,
-    dir::AbstractString,
-    pattern::AbstractString,
-)::Vector{String}
+        snapshot::Snapshot,
+        dir::AbstractString,
+        pattern::AbstractString,
+    )::Vector{String}
     if isempty(snapshot.revision)
         found = [
             replace(relpath(joinpath(folder, file), snapshot.root), '\\' => '/')
-            for (folder, _, files) in walkdir(joinpath(snapshot.root, dir))
-            for file in files
+                for (folder, _, files) in walkdir(joinpath(snapshot.root, dir))
+                for file in files
         ]
     else
         found = collect(keys(tree_blobs(snapshot.root, snapshot.revision)))
     end
-    return sort([
-        path
-        for path in found
-        if startswith(path, string(dir, "/")) && occursin(Regex(pattern), basename(path))
-    ])
+    return sort(
+        [
+            path
+                for path in found
+                if startswith(path, string(dir, "/")) && occursin(Regex(pattern), basename(path))
+        ]
+    )
 end
 
 """
@@ -428,15 +437,15 @@ One `:testset` item per suite file under `dir`, named by its path from `dir` and
 whole file, followed by the items of the files it includes, recursively.
 """
 function suite_items(
-    snapshot::Snapshot,
-    dir::AbstractString,
-    pattern::AbstractString,
-)::Vector{Located}
+        snapshot::Snapshot,
+        dir::AbstractString,
+        pattern::AbstractString,
+    )::Vector{Located}
     return reduce(
         vcat,
         (
             suite_file_items(snapshot, dir, path)
-            for path in suite_paths(snapshot, dir, pattern)
+                for path in suite_paths(snapshot, dir, pattern)
         );
         init = Located[],
     )
@@ -448,10 +457,10 @@ included file runs as part of the suite, so it adds its mentions to the suite in
 a testset of its own.
 """
 function suite_file_items(
-    snapshot::Snapshot,
-    dir::AbstractString,
-    path::AbstractString,
-)::Vector{Located}
+        snapshot::Snapshot,
+        dir::AbstractString,
+        path::AbstractString,
+    )::Vector{Located}
     text = read_file(snapshot, path)
     items = source_items(text, label(snapshot, path))
     includes = unique(reduce(vcat, (item.includes for item in items); init = String[]))
@@ -459,7 +468,7 @@ function suite_file_items(
         vcat,
         (
             located_items(snapshot, slashed(normpath(joinpath(dirname(path), file))))
-            for file in includes
+                for file in includes
         );
         init = Located[],
     )
@@ -487,24 +496,26 @@ end
 
 "Each suite's name, with the files it runs: its own and those it includes, recursively."
 function suite_files(
-    snapshot::Snapshot,
-    dir::AbstractString,
-    pattern::AbstractString,
-)::Dict{String, Set{String}}
+        snapshot::Snapshot,
+        dir::AbstractString,
+        pattern::AbstractString,
+    )::Dict{String, Set{String}}
     return Dict(
         relpath_slash(path, dir) => Set(
             located.path
-            for located in suite_file_items(snapshot, dir, path)
+                for located in suite_file_items(snapshot, dir, path)
         )
-        for path in suite_paths(snapshot, dir, pattern)
+            for path in suite_paths(snapshot, dir, pattern)
     )
 end
 
 "`path` relative to directory `dir`, both `/`-separated paths from the root."
-relpath_slash(path::AbstractString, dir::AbstractString)::String = String(chopprefix(
-    path,
-    string(dir, "/"),
-))
+relpath_slash(path::AbstractString, dir::AbstractString)::String = String(
+    chopprefix(
+        path,
+        string(dir, "/"),
+    )
+)
 
 """
     test_items(snapshot, tests, suites, suite_pattern)
@@ -513,11 +524,11 @@ The test items the map knows: the suites under `suites` when it is set, else the
 entry file `tests` and the files it includes.
 """
 function test_items(
-    snapshot::Snapshot,
-    tests::AbstractString,
-    suites::AbstractString,
-    suite_pattern::AbstractString,
-)::Vector{Located}
+        snapshot::Snapshot,
+        tests::AbstractString,
+        suites::AbstractString,
+        suite_pattern::AbstractString,
+    )::Vector{Located}
     if isempty(suites)
         return located_items(snapshot, tests)
     end
@@ -551,13 +562,13 @@ function parse_hunk(chunk::AbstractString)::Hunk
         count_or_one(found[4]),
         String[
             chopprefix(line, "-")
-            for line in Iterators.drop(lines, 1)
-            if startswith(line, "-")
+                for line in Iterators.drop(lines, 1)
+                if startswith(line, "-")
         ],
         String[
             chopprefix(line, "+")
-            for line in Iterators.drop(lines, 1)
-            if startswith(line, "+")
+                for line in Iterators.drop(lines, 1)
+                if startswith(line, "+")
         ]
     )
 end
@@ -579,7 +590,7 @@ end
 
 parse_diff(text::AbstractString)::Vector{FileChange} = [
     parse_file_change(chunk)
-    for chunk in split(text, r"^diff --git "m; keepempty = false)
+        for chunk in split(text, r"^diff --git "m; keepempty = false)
 ]
 
 "A file git does not track yet, as a change that adds all its lines."
@@ -603,28 +614,30 @@ files included, when `target` is empty), without rename detection: a rename is a
 and an addition.
 """
 function file_changes(
-    root::AbstractString,
-    base::AbstractString,
-    target::AbstractString,
-)::Vector{FileChange}
+        root::AbstractString,
+        base::AbstractString,
+        target::AbstractString,
+    )::Vector{FileChange}
     revisions = filter(!isempty, [String(base), String(target)])
-    tracked = parse_diff(git(
-        root,
-        "diff",
-        "--no-renames",
-        "--no-color",
-        "--no-ext-diff",
-        "-U0",
-        revisions...,
-        "--",
-    ))
+    tracked = parse_diff(
+        git(
+            root,
+            "diff",
+            "--no-renames",
+            "--no-color",
+            "--no-ext-diff",
+            "-U0",
+            revisions...,
+            "--",
+        )
+    )
     if !isempty(target)
         return tracked
     end
     listing = git(root, "ls-files", "--others", "--exclude-standard")
     untracked = [
         untracked_change(root, path)
-        for path in split(listing, '\n'; keepempty = false)
+            for path in split(listing, '\n'; keepempty = false)
     ]
     return vcat(tracked, untracked)
 end
@@ -634,23 +647,25 @@ function tree_blobs(root::AbstractString, revision::AbstractString)::Dict{String
     listing = git(root, "ls-tree", "-r", "--full-tree", revision)
     rows = [
         split(row, r"[ \t]"; limit = 4)
-        for row in split(listing, '\n'; keepempty = false)
+            for row in split(listing, '\n'; keepempty = false)
     ]
     return Dict(String(row[4]) => String(row[3]) for row in rows)
 end
 
 "The `.jl` files under the `sources` directories at `revision`."
 function source_files(
-    root::AbstractString,
-    revision::AbstractString,
-    sources::AbstractVector{<:AbstractString},
-)::Vector{String}
-    return sort([
-        path
-        for path in keys(tree_blobs(root, revision))
-        if endswith(path, ".jl") &&
-            any(startswith(path, string(dir, "/")) for dir in sources)
-    ])
+        root::AbstractString,
+        revision::AbstractString,
+        sources::AbstractVector{<:AbstractString},
+    )::Vector{String}
+    return sort(
+        [
+            path
+                for path in keys(tree_blobs(root, revision))
+                if endswith(path, ".jl") &&
+                any(startswith(path, string(dir, "/")) for dir in sources)
+        ]
+    )
 end
 
 # ---------------------------------------------------------------------------------------
@@ -701,7 +716,7 @@ function ranges_text(lines::AbstractVector{<:Integer})::String
     return join(
         (
             run_text(sorted[run_start], sorted[run_stop])
-            for (run_start, run_stop) in zip(run_starts, run_stops)
+                for (run_start, run_stop) in zip(run_starts, run_stops)
         ),
         ',',
     )
@@ -735,7 +750,7 @@ function read_map(path::AbstractString)::CoverageMap
     meta = document["meta"]
     definitions = Dict(
         String(file) => String[headers...]
-        for (file, headers) in document["definitions"]
+            for (file, headers) in document["definitions"]
     )
     testsets = Dict(
         String(name) => TestsetCoverage(
@@ -743,10 +758,10 @@ function read_map(path::AbstractString)::CoverageMap
             entry["ms"],
             Dict(
                 String(file) => headers_at(definitions[file], positions)
-                for (file, positions) in entry["functions"]
+                    for (file, positions) in entry["functions"]
             )
         )
-        for (name, entry) in document["testsets"]
+            for (name, entry) in document["testsets"]
     )
     # Maps from before `--project` ran the runner in the root's project.
     project = get(meta, "project", ".")
@@ -787,11 +802,13 @@ end
 "Names of the map's testsets that executed function `item`."
 function covering(map::CoverageMap, path::AbstractString, item::Item)::Vector{String}
     file = mapped_file(map, path, item)
-    return sort([
-        name
-        for (name, entry) in map.testsets
-        if item.header in get(entry.functions, file, Set{String}())
-    ])
+    return sort(
+        [
+            name
+                for (name, entry) in map.testsets
+                if item.header in get(entry.functions, file, Set{String}())
+        ]
+    )
 end
 
 # ---------------------------------------------------------------------------------------
@@ -802,19 +819,21 @@ end
 Names whose use marks code that reads source files or analyses the whole package (JET,
 Aqua, file scans): such a testset depends on every source file, not on the lines it runs.
 """
-const STATIC_MARKERS = Set([
-    "walkdir",
-    "readdir",
-    "pkgdir",
-    "pathof",
-    "Aqua",
-    "test_opt",
-    "test_call",
-    "test_package",
-    "report_opt",
-    "report_call",
-    "report_package",
-])
+const STATIC_MARKERS = Set(
+    [
+        "walkdir",
+        "readdir",
+        "pkgdir",
+        "pathof",
+        "Aqua",
+        "test_opt",
+        "test_call",
+        "test_package",
+        "report_opt",
+        "report_call",
+        "report_package",
+    ]
+)
 
 "Whether `item` reads or analyses code: a marker name, or listing a module's names (`names(mod; all = true)`)."
 function static_item(item::Item)::Bool
@@ -849,8 +868,8 @@ function added_functions(delta::Delta)::Vector{Located}
     old_headers = Set(item.header for item in delta.old_hit if item.kind == :function)
     return [
         Located(delta.path, item)
-        for item in delta.new_hit
-        if item.kind == :function && !(item.header in old_headers)
+            for item in delta.new_hit
+            if item.kind == :function && !(item.header in old_headers)
     ]
 end
 
@@ -859,10 +878,10 @@ function in_doc(items::AbstractVector{Item}, number::Integer)::Bool
 end
 
 function ignorable_line(
-    text::AbstractString,
-    number::Integer,
-    items::AbstractVector{Item},
-)::Bool
+        text::AbstractString,
+        number::Integer,
+        items::AbstractVector{Item},
+    )::Bool
     stripped = strip(text)
     return isempty(stripped) || startswith(stripped, "#") || in_doc(items, number)
 end
@@ -872,8 +891,8 @@ function code_tokens(lines::AbstractVector{<:AbstractString})::Vector{String}
     text = join(lines, '\n')
     return [
         String(JS.untokenize(token, text))
-        for token in JS.tokenize(text)
-        if !JS.is_whitespace(JS.kind(token))
+            for token in JS.tokenize(text)
+            if !JS.is_whitespace(JS.kind(token))
     ]
 end
 
@@ -902,23 +921,23 @@ Whether a hunk changes nothing but blanks, comments and docstrings: the lines ou
 docstrings carry the same tokens, and the items around the hunk parse the same.
 """
 function ignorable(
-    hunk::Hunk,
-    old_items::AbstractVector{Item},
-    new_items::AbstractVector{Item},
-)::Bool
+        hunk::Hunk,
+        old_items::AbstractVector{Item},
+        new_items::AbstractVector{Item},
+    )::Bool
     removed = [
         text
-        for (offset, text) in enumerate(hunk.removed)
-        if !ignorable_line(text, hunk.old_first + offset - 1, old_items)
+            for (offset, text) in enumerate(hunk.removed)
+            if !ignorable_line(text, hunk.old_first + offset - 1, old_items)
     ]
     added = [
         text
-        for (offset, text) in enumerate(hunk.added)
-        if !ignorable_line(text, hunk.new_first + offset - 1, new_items)
+            for (offset, text) in enumerate(hunk.added)
+            if !ignorable_line(text, hunk.new_first + offset - 1, new_items)
     ]
     return code_tokens(removed) == code_tokens(added) &&
         code_digest.(items_around(old_items, hunk.old_first, hunk.old_count)) ==
-            code_digest.(items_around(new_items, hunk.new_first, hunk.new_count))
+        code_digest.(items_around(new_items, hunk.new_first, hunk.new_count))
 end
 
 function overlapping(items::AbstractVector{Item}, low::Integer, high::Integer)::Vector{Item}
@@ -927,8 +946,8 @@ end
 
 "Items `count` lines from `start` touch; no lines touch the item they land inside."
 function items_around(items::AbstractVector{Item}, start::Integer, count::Integer)::Vector{
-    Item,
-}
+        Item,
+    }
     if count > 0
         return overlapping(items, start, start + count - 1)
     end
@@ -961,10 +980,10 @@ Parse the file on both sides and keep the items touched by hunks that change mor
 blanks, comments and docstrings. A file that does not parse raises an error.
 """
 function file_delta(
-    old_snapshot::Snapshot,
-    new_snapshot::Snapshot,
-    change::FileChange,
-)::Delta
+        old_snapshot::Snapshot,
+        new_snapshot::Snapshot,
+        change::FileChange,
+    )::Delta
     old_items = items_at(old_snapshot, change.path, change.status != :added)
     new_items = items_at(new_snapshot, change.path, change.status != :deleted)
     hunks = [hunk for hunk in change.hunks if !ignorable(hunk, old_items, new_items)]
@@ -987,14 +1006,16 @@ end
 function widened_names(delta::Delta)::Vector{String}
     old_functions = [item for item in delta.old_hit if item.kind == :function]
     new_functions = [item for item in delta.new_hit if item.kind == :function]
-    names = unique(vcat(
-        [item.name for item in old_functions],
-        [item.name for item in new_functions],
-    ))
+    names = unique(
+        vcat(
+            [item.name for item in old_functions],
+            [item.name for item in new_functions],
+        )
+    )
     return [
         name
-        for name in names
-        if headers(old_functions, name) != headers(new_functions, name)
+            for name in names
+            if headers(old_functions, name) != headers(new_functions, name)
     ]
 end
 
@@ -1018,11 +1039,13 @@ import_item(item::Item)::Bool = item.kind == :other &&
 
 "The names the `using` and `import` statements among `items` bring in."
 function imported_names(items::AbstractVector{Item})::Vector{String}
-    return unique(reduce(
-        vcat,
-        (binding_keys(item) for item in items if import_item(item));
-        init = String[],
-    ))
+    return unique(
+        reduce(
+            vcat,
+            (binding_keys(item) for item in items if import_item(item));
+            init = String[],
+        )
+    )
 end
 
 """
@@ -1034,14 +1057,16 @@ starts using it, which is a change of its own.
 function delta_names(delta::Delta)::Vector{String}
     touched = [
         item
-        for item in vcat(delta.old_hit, delta.new_hit)
-        if item.kind in (:binding, :other) && !import_item(item)
+            for item in vcat(delta.old_hit, delta.new_hit)
+            if item.kind in (:binding, :other) && !import_item(item)
     ]
     dropped = setdiff(imported_names(delta.old_hit), imported_names(delta.new_hit))
-    return unique(vcat(
-        reduce(vcat, (binding_keys(item) for item in touched); init = String[]),
-        dropped,
-    ))
+    return unique(
+        vcat(
+            reduce(vcat, (binding_keys(item) for item in touched); init = String[]),
+            dropped,
+        )
+    )
 end
 
 """
@@ -1056,8 +1081,8 @@ function name_closure(seeds::Set{String}, binders::AbstractVector{Located})::Set
             vcat,
             (
                 binder.item.keys
-                for binder in binders
-                if !isdisjoint(binder.item.mentions, seeds)
+                    for binder in binders
+                    if !isdisjoint(binder.item.mentions, seeds)
             );
             init = String[],
         ),
@@ -1082,17 +1107,19 @@ whose constructor method also reports a leak, a helper shared with ordinary test
 out, so ordinary testsets that use it are not taken for static analysis.
 """
 function static_closure(names::Set{String}, binders::AbstractVector{Located})::Set{String}
-    candidates = unique(reduce(
-        vcat,
-        (binder.item.keys for binder in binders if static_user(binder.item, names));
-        init = String[],
-    ))
+    candidates = unique(
+        reduce(
+            vcat,
+            (binder.item.keys for binder in binders if static_user(binder.item, names));
+            init = String[],
+        )
+    )
     grown = union(
         names,
         [
             name
-            for name in candidates
-            if !isdefined(Base, Symbol(name)) &&
+                for name in candidates
+                if !isdefined(Base, Symbol(name)) &&
                 all(
                     static_user(binder.item, names)
                     for binder in binders
@@ -1112,26 +1139,26 @@ end
 
 "Testsets that run `item`, each paired with the rule that selected it."
 function by_coverage(
-    map::CoverageMap,
-    path::AbstractString,
-    item::Item,
-    rule::AbstractString,
-)::Vector{Pair{String, String}}
+        map::CoverageMap,
+        path::AbstractString,
+        item::Item,
+        rule::AbstractString,
+    )::Vector{Pair{String, String}}
     return [
         name => string(rule, " (", describe_item(path, item), ")")
-        for name in covering(map, path, item)
+            for name in covering(map, path, item)
     ]
 end
 
 function full_suite_reasons(
-    changes::AbstractVector{FileChange},
-    sources::AbstractVector{<:AbstractString},
-    project::AbstractString,
-)::Vector{String}
+        changes::AbstractVector{FileChange},
+        sources::AbstractVector{<:AbstractString},
+        project::AbstractString,
+    )::Vector{String}
     return [
         string(change.path, " changed")
-        for change in changes
-        if dependency_file(change.path, sources, project)
+            for change in changes
+            if dependency_file(change.path, sources, project)
     ]
 end
 
@@ -1143,29 +1170,31 @@ root, in or under a source directory, in the package holding a source directory 
 `pkg/src`), or in the runner's `project` directory.
 """
 function dependency_file(
-    path::AbstractString,
-    sources::AbstractVector{<:AbstractString},
-    project::AbstractString,
-)::Bool
+        path::AbstractString,
+        sources::AbstractVector{<:AbstractString},
+        project::AbstractString,
+    )::Bool
     name = basename(path)
     named = name == "Project.toml" ||
         (startswith(name, "Manifest") && endswith(name, ".toml"))
-    folders = Set(vcat(
-        [""],
-        [dirname(dir) for dir in sources],
-        [project == "." ? "" : rstrip(project, '/')],
-    ))
+    folders = Set(
+        vcat(
+            [""],
+            [dirname(dir) for dir in sources],
+            [project == "." ? "" : rstrip(project, '/')],
+        )
+    )
     placed = dirname(path) in folders ||
         any(startswith(path, string(dir, "/")) for dir in sources)
     return named && placed
 end
 
 function path_class(
-    path::AbstractString,
-    test_paths::AbstractSet{String},
-    test_dir::AbstractString,
-    sources::AbstractVector{<:AbstractString},
-)::Symbol
+        path::AbstractString,
+        test_paths::AbstractSet{String},
+        test_dir::AbstractString,
+        sources::AbstractVector{<:AbstractString},
+    )::Symbol
     if !endswith(path, ".jl")
         if startswith(path, string(test_dir, "/"))
             return :fixture
@@ -1198,29 +1227,31 @@ working tree when `target` is empty). Rules, in the order they appear in the rea
   * static analysis: the testset reads or analyses code and any `.jl` file changed
 """
 function select_testsets(
-    root::AbstractString,
-    map::CoverageMap,
-    base::AbstractString,
-    target::AbstractString,
-)::Selection
+        root::AbstractString,
+        map::CoverageMap,
+        base::AbstractString,
+        target::AbstractString,
+    )::Selection
     changes = file_changes(root, base, target)
     old_snapshot = Snapshot(String(root), String(base))
     new_snapshot = Snapshot(String(root), String(target))
     old_tests = test_items(old_snapshot, map.tests, map.suites, map.suite_pattern)
     new_tests = test_items(new_snapshot, map.tests, map.suites, map.suite_pattern)
-    test_paths = Set(vcat(
-        [map.tests],
-        [located.path for located in vcat(old_tests, new_tests)],
-    ))
+    test_paths = Set(
+        vcat(
+            [map.tests],
+            [located.path for located in vcat(old_tests, new_tests)],
+        )
+    )
     test_dir = isempty(map.suites) ? dirname(map.tests) : map.suites
     classes = [
         path_class(change.path, test_paths, test_dir, map.sources)
-        for change in changes
+            for change in changes
     ]
     runnable = Set(
         located.item.name
-        for located in new_tests
-        if located.item.kind == :testset
+            for located in new_tests
+            if located.item.kind == :testset
     )
 
     full = full_suite_reasons(changes, map.sources, map.project)
@@ -1230,29 +1261,29 @@ function select_testsets(
             full,
             [
                 string(change.path, " changed: the runner runs every suite")
-                for change in changes
-                if change.path == map.runner
+                    for change in changes
+                    if change.path == map.runner
             ],
         )
     end
     if !isempty(full)
         everything = [
             name => "full suite: " * reason
-            for name in sort(collect(runnable))
-            for reason in full
+                for name in sort(collect(runnable))
+                for reason in full
         ]
         return Selection(everything, full, String[], String[], 0, String[])
     end
 
     source_deltas = [
         file_delta(old_snapshot, new_snapshot, change)
-        for (change, class) in zip(changes, classes)
-        if class == :source
+            for (change, class) in zip(changes, classes)
+            if class == :source
     ]
     test_deltas = [
         file_delta(old_snapshot, new_snapshot, change)
-        for (change, class) in zip(changes, classes)
-        if class == :test
+            for (change, class) in zip(changes, classes)
+            if class == :test
     ]
     any_jl = any(endswith(change.path, ".jl") for change in changes)
 
@@ -1260,19 +1291,19 @@ function select_testsets(
         vcat,
         (
             [Located(delta.path, item) for item in delta.old_hit if item.kind == :function]
-            for delta in source_deltas
+                for delta in source_deltas
         );
         init = Located[],
     )
     lacking = [
         located
-        for located in changed
-        if isempty(mapped_file(map, located.path, located.item))
+            for located in changed
+            if isempty(mapped_file(map, located.path, located.item))
     ]
     executed = [
         located
-        for located in changed
-        if !isempty(mapped_file(map, located.path, located.item))
+            for located in changed
+            if !isempty(mapped_file(map, located.path, located.item))
     ]
     added = reduce(
         vcat,
@@ -1283,8 +1314,8 @@ function select_testsets(
         lacking,
         [
             located
-            for located in added
-            if isempty(mapped_file(map, located.path, located.item))
+                for located in added
+                if isempty(mapped_file(map, located.path, located.item))
         ],
     )
     absent_lines = [
@@ -1295,7 +1326,7 @@ function select_testsets(
             describe_item(located.path, located.item),
             ")",
         )
-        for located in absent
+            for located in absent
     ]
     run_reasons = reduce(
         vcat,
@@ -1306,7 +1337,7 @@ function select_testsets(
                 located.item,
                 "runs changed `" * located.item.name * "`",
             )
-            for located in executed
+                for located in executed
         );
         init = Pair{String, String}[],
     )
@@ -1318,22 +1349,24 @@ function select_testsets(
             describe_item(located.path, located.item),
             "): no testset ran it",
         )
-        for located in executed
-        if isempty(covering(map, located.path, located.item))
+            for located in executed
+            if isempty(covering(map, located.path, located.item))
     ]
 
     old_sources = reduce(
         vcat,
         (
             [Located(path, item) for item in items_at(old_snapshot, path, true)]
-            for path in source_files(root, base, map.sources)
+                for path in source_files(root, base, map.sources)
         );
         init = Located[],
     )
-    widened = unique(vcat(
-        reduce(vcat, (widened_names(delta) for delta in source_deltas); init = String[]),
-        [located.item.name for located in lacking],
-    ))
+    widened = unique(
+        vcat(
+            reduce(vcat, (widened_names(delta) for delta in source_deltas); init = String[]),
+            [located.item.name for located in lacking],
+        )
+    )
     dispatch_reasons = reduce(
         vcat,
         (
@@ -1343,21 +1376,23 @@ function select_testsets(
                 located.item,
                 "dispatch: methods of `" * located.item.name * "` changed",
             )
-            for located in old_sources
-            if located.item.kind == :function && located.item.name in widened
+                for located in old_sources
+                if located.item.kind == :function && located.item.name in widened
         );
         init = Pair{String, String}[],
     )
 
-    source_seeds = Set(reduce(
-        vcat,
-        (delta_names(delta) for delta in source_deltas);
-        init = String[],
-    ))
+    source_seeds = Set(
+        reduce(
+            vcat,
+            (delta_names(delta) for delta in source_deltas);
+            init = String[],
+        )
+    )
     source_binders = [
         located
-        for located in old_sources
-        if located.item.kind in (:binding, :other)
+            for located in old_sources
+            if located.item.kind in (:binding, :other)
     ]
     source_names = name_closure(source_seeds, source_binders)
     mention_reasons = reduce(
@@ -1371,8 +1406,8 @@ function select_testsets(
                     first(sort(collect(intersect(located.item.mentions, source_names)))) *
                     "`",
             )
-            for located in old_sources
-            if located.item.kind == :function &&
+                for located in old_sources
+                if located.item.kind == :function &&
                 !isdisjoint(located.item.mentions, source_names)
         );
         init = Pair{String, String}[],
@@ -1381,9 +1416,9 @@ function select_testsets(
     new_testsets = [located for located in new_tests if located.item.kind == :testset]
     edited = [
         item.name => string("edited testset (", describe_item(delta.path, item), ")")
-        for delta in test_deltas
-        for item in delta.new_hit
-        if item.kind == :testset
+            for delta in test_deltas
+            for item in delta.new_hit
+            if item.kind == :testset
     ]
     if !isempty(map.suites)
         # A suite is its whole file and the files it includes: a code change in any edits it.
@@ -1392,49 +1427,53 @@ function select_testsets(
             edited,
             [
                 located.item.name => string("edited suite (", delta.path, ")")
-                for located in new_testsets
-                for delta in test_deltas
-                if delta.path in files[located.item.name] &&
+                    for located in new_testsets
+                    for delta in test_deltas
+                    if delta.path in files[located.item.name] &&
                     !isempty(vcat(delta.old_hit, delta.new_hit))
             ],
         )
     end
-    helper_seeds = Set(reduce(
-        vcat,
-        ([name for name in delta_names(delta)] for delta in test_deltas);
-        init = String[],
-    ))
+    helper_seeds = Set(
+        reduce(
+            vcat,
+            ([name for name in delta_names(delta)] for delta in test_deltas);
+            init = String[],
+        )
+    )
     helper_functions = reduce(
         vcat,
         (
             [
                 item.name
-                for item in vcat(delta.old_hit, delta.new_hit)
-                if item.kind == :function
+                    for item in vcat(delta.old_hit, delta.new_hit)
+                    if item.kind == :function
             ]
-            for delta in test_deltas
+                for delta in test_deltas
         );
         init = String[],
     )
     fixtures = [
         basename(change.path)
-        for (change, class) in zip(changes, classes)
-        if class == :fixture
+            for (change, class) in zip(changes, classes)
+            if class == :fixture
     ]
     test_binders = [
         located
-        for located in new_tests
-        if located.item.kind in (:function, :binding, :other)
+            for located in new_tests
+            if located.item.kind in (:function, :binding, :other)
     ]
-    fixture_seeds = Set(reduce(
-        vcat,
-        (
-            binding_keys(binder.item)
-            for binder in test_binders
-            if any(occursin(file, binder.item.text) for file in fixtures)
-        );
-        init = String[],
-    ))
+    fixture_seeds = Set(
+        reduce(
+            vcat,
+            (
+                binding_keys(binder.item)
+                    for binder in test_binders
+                    if any(occursin(file, binder.item.text) for file in fixtures)
+            );
+            init = String[],
+        )
+    )
     test_names = name_closure(
         union(
             helper_seeds,
@@ -1448,18 +1487,18 @@ function select_testsets(
     use_reasons = [
         located.item.name =>
             "mentions changed `" *
-                first(sort(collect(intersect(located.item.mentions, test_names)))) *
-                "`"
-        for located in new_testsets
-        if !isdisjoint(located.item.mentions, test_names)
+            first(sort(collect(intersect(located.item.mentions, test_names)))) *
+            "`"
+            for located in new_testsets
+            if !isdisjoint(located.item.mentions, test_names)
     ]
     unreached = [
         name
-        for name in widened
-        if !any(
-            endswith(last(pair), string("`", name, "` changed"))
-            for pair in dispatch_reasons
-        ) &&
+            for name in widened
+            if !any(
+                endswith(last(pair), string("`", name, "` changed"))
+                for pair in dispatch_reasons
+            ) &&
             !any(name in located.item.mentions for located in new_testsets)
     ]
     unreached_lines = [
@@ -1468,24 +1507,24 @@ function select_testsets(
             name,
             "`: no testset ran a method of it or names it",
         )
-        for name in unreached
+            for name in unreached
     ]
     fixture_reasons = [
         located.item.name => "reads changed fixture `" * file * "`"
-        for located in new_testsets
-        for file in fixtures
-        if occursin(file, located.item.text)
+            for located in new_testsets
+            for file in fixtures
+            if occursin(file, located.item.text)
     ]
     new_reasons = [
         located.item.name => "new testset, not in the map"
-        for located in new_testsets
-        if !haskey(map.testsets, located.item.name)
+            for located in new_testsets
+            if !haskey(map.testsets, located.item.name)
     ]
     static_names = static_closure(copy(STATIC_MARKERS), test_binders)
     static_reasons = [
         located.item.name => "static analysis: reads or analyses code, a .jl file changed"
-        for located in new_testsets
-        if any_jl &&
+            for located in new_testsets
+            if any_jl &&
             (static_item(located.item) || !isdisjoint(located.item.mentions, static_names))
     ]
 
@@ -1509,7 +1548,7 @@ function select_testsets(
             map.testsets[name].status,
             ": its coverage may be partial",
         )
-        for name in weak
+            for name in weak
     ]
     return Selection(
         reasons,
@@ -1539,8 +1578,8 @@ The runner's arguments selecting the testsets `names`: the suite paths themselve
 testsets are suite files (`by_path`), else one ReTest regex.
 """
 function runner_arguments(by_path::Bool, names::AbstractVector{<:AbstractString})::Vector{
-    String,
-}
+        String,
+    }
     if by_path
         return String[names...]
     end
@@ -1548,12 +1587,12 @@ function runner_arguments(by_path::Bool, names::AbstractVector{<:AbstractString}
 end
 
 function report(
-    io::IO,
-    map::CoverageMap,
-    selection::Selection,
-    base::AbstractString,
-    target::AbstractString,
-)::Nothing
+        io::IO,
+        map::CoverageMap,
+        selection::Selection,
+        base::AbstractString,
+        target::AbstractString,
+    )::Nothing
     names = sort(unique(first.(selection.reasons)))
     println(
         io,
@@ -1588,11 +1627,13 @@ function report(
     end
     println(io, "selected ", length(names), " testsets")
     for name in names
-        reasons = unique([
-            reason
-            for (testset, reason) in selection.reasons
-            if testset == name
-        ])
+        reasons = unique(
+            [
+                reason
+                    for (testset, reason) in selection.reasons
+                    if testset == name
+            ]
+        )
         shown = join(first(reasons, 3), "; ")
         println(
             io,
@@ -1625,9 +1666,9 @@ function is_hit(row::AbstractString)::Bool
 end
 
 function record_lines(record::AbstractString, root::AbstractString)::Pair{
-    String,
-    Vector{Int},
-}
+        String,
+        Vector{Int},
+    }
     rows = split(record, '\n')
     files = [chopprefix(row, "SF:") for row in rows if startswith(row, "SF:")]
     if isempty(files)
@@ -1635,8 +1676,8 @@ function record_lines(record::AbstractString, root::AbstractString)::Pair{
     end
     hit = [
         parse(Int, first(split(chopprefix(row, "DA:"), ',')))
-        for row in rows
-        if is_hit(row)
+            for row in rows
+            if is_hit(row)
     ]
     return relative_path(root, String(first(files))) => hit
 end
@@ -1648,15 +1689,15 @@ The executed lines of every file under one of the `sources` directories of `root
 LCOV tracefile.
 """
 function lcov_files(
-    text::AbstractString,
-    root::AbstractString,
-    sources::AbstractVector{<:AbstractString},
-)::Dict{String, Vector{Int}}
+        text::AbstractString,
+        root::AbstractString,
+        sources::AbstractVector{<:AbstractString},
+    )::Dict{String, Vector{Int}}
     records = [record_lines(record, root) for record in split(text, "end_of_record")]
     return Dict(
         file => lines
-        for (file, lines) in records
-        if !isempty(lines) && any(startswith(file, string(dir, "/")) for dir in sources)
+            for (file, lines) in records
+            if !isempty(lines) && any(startswith(file, string(dir, "/")) for dir in sources)
     )
 end
 
@@ -1704,15 +1745,17 @@ The positions (as `ranges_text` writes them) of the `spans`, a file's functions 
 order, that contain an executed line.
 """
 function executed_positions(
-    lines::AbstractVector{Int},
-    spans::AbstractVector{UnitRange{Int}},
-)::String
+        lines::AbstractVector{Int},
+        spans::AbstractVector{UnitRange{Int}},
+    )::String
     sorted = sort(lines)
-    return ranges_text([
-        position
-        for (position, span) in enumerate(spans)
-        if executes(sorted, span)
-    ])
+    return ranges_text(
+        [
+            position
+                for (position, span) in enumerate(spans)
+                if executes(sorted, span)
+        ]
+    )
 end
 
 "The functions of a source file, in file order."
@@ -1722,9 +1765,9 @@ end
 
 function (worker::Worker)(name::AbstractString)::Pair{String, Dict{String, Any}}
     stem = first(bytes2hex(SHA.sha1(name)), 12)
-    info = joinpath(worker.logs, stem * ".info")
+    # A fresh tracefile name, so no earlier run's coverage can be read.
+    info = tempname(worker.logs) * ".info"
     log = joinpath(worker.logs, stem * ".log")
-    rm(info; force = true)
     # `environment` (for ReTest-style runners, a variable that keeps the testset in this
     # coverage-flagged process: distributed workers would start without the coverage flags).
     command = addenv(
@@ -1739,7 +1782,7 @@ function (worker::Worker)(name::AbstractString)::Pair{String, Dict{String, Any}}
     outcome = timedwait(Exited(process), worker.timeout)
     if outcome == :timed_out
         kill(process, Base.SIGINT)
-        if timedwait(Exited(process), 120) == :timed_out
+        if timedwait(Exited(process), min(120, worker.timeout)) == :timed_out
             kill(process, Base.SIGKILL)
         end
     end
@@ -1766,7 +1809,7 @@ function (worker::Worker)(name::AbstractString)::Pair{String, Dict{String, Any}}
         "ms" => milliseconds,
         "functions" => Dict{String, Any}(
             file => executed_positions(covered, get(worker.spans, file, UnitRange{Int}[]))
-            for (file, covered) in lines
+                for (file, covered) in lines
         )
     )
 end
@@ -1774,9 +1817,9 @@ end
 function jl_files(root::AbstractString, dir::AbstractString)::Vector{String}
     found = [
         slashed(relpath(joinpath(folder, file), root))
-        for (folder, _, files) in walkdir(joinpath(root, dir))
-        for file in files
-        if endswith(file, ".jl")
+            for (folder, _, files) in walkdir(joinpath(root, dir))
+            for file in files
+            if endswith(file, ".jl")
     ]
     return sort(found)
 end
@@ -1794,28 +1837,28 @@ precompilation finishes before the rest start together. The map lists the functi
 `.jl` file under `sources` (as parsed in `root`) and records, per testset, which ran.
 """
 function build_map(
-    root::AbstractString,
-    out::AbstractString;
-    tests::AbstractString,
-    suites::AbstractString,
-    suite_pattern::AbstractString,
-    sources::AbstractVector{<:AbstractString},
-    runner::AbstractString,
-    project::AbstractString,
-    jobs::Integer,
-    timeout::Integer,
-    only::AbstractVector{<:AbstractString},
-    shard::Integer,
-    shards::Integer,
-    commit::AbstractString,
-    environment::AbstractVector{Pair{String, String}},
-)::Nothing
+        root::AbstractString,
+        out::AbstractString;
+        tests::AbstractString,
+        suites::AbstractString,
+        suite_pattern::AbstractString,
+        sources::AbstractVector{<:AbstractString},
+        runner::AbstractString,
+        project::AbstractString,
+        jobs::Integer,
+        timeout::Integer,
+        only::AbstractVector{<:AbstractString},
+        shard::Integer,
+        shards::Integer,
+        commit::AbstractString,
+        environment::AbstractVector{Pair{String, String}},
+    )::Nothing
     located = test_items(Snapshot(String(root), ""), tests, suites, suite_pattern)
     testsets = [entry for entry in located if entry.item.kind == :testset]
     dynamic = [
         describe_item(entry.path, entry.item)
-        for entry in testsets
-        if isempty(entry.item.name)
+            for entry in testsets
+            if isempty(entry.item.name)
     ]
     if !isempty(dynamic)
         error(
@@ -1825,8 +1868,8 @@ function build_map(
     end
     hidden = [
         describe_item(entry.path, entry.item)
-        for entry in located
-        if entry.item.kind == :other && occursin("@testset", entry.item.text)
+            for entry in located
+            if entry.item.kind == :other && occursin("@testset", entry.item.text)
     ]
     for place in hidden
         println(
@@ -1838,16 +1881,16 @@ function build_map(
     spans = Dict(
         name => sum(
             entry.item.last - entry.item.first
-            for entry in testsets
-            if entry.item.name == name
+                for entry in testsets
+                if entry.item.name == name
         )
-        for name in unique([entry.item.name for entry in testsets])
+            for name in unique([entry.item.name for entry in testsets])
     )
     names = first.(sort(collect(spans); by = last))
     names = [
         name
-        for name in names
-        if isempty(only) || any(occursin(part, name) for part in only)
+            for name in names
+            if isempty(only) || any(occursin(part, name) for part in only)
     ][shard:shards:end]
     if isempty(names)
         error(
@@ -1867,11 +1910,11 @@ function build_map(
     functions = Dict(path => file_functions(snapshot, path) for path in paths)
     definitions = Dict(
         path => String[item.header for item in items]
-        for (path, items) in functions
+            for (path, items) in functions
     )
     line_spans = Dict(
         path => UnitRange{Int}[item.first:item.last for item in items]
-        for (path, items) in functions
+            for (path, items) in functions
     )
     worker = Worker(
         String(root),
@@ -1909,8 +1952,8 @@ function build_map(
     write(out, take!(buffer))
     unhealthy = [
         name => result["status"]
-        for (name, result) in results
-        if result["status"] != "ok"
+            for (name, result) in results
+            if result["status"] != "ok"
     ]
     println(
         stderr,
@@ -1940,15 +1983,15 @@ function merge_maps(out::AbstractString, inputs::AbstractVector{<:AbstractString
     for (input, document) in zip(inputs, documents)
         same_meta = all(
             get(document["meta"], key, nothing) == get(reference["meta"], key, nothing)
-            for key in (
-                "commit",
-                "tests",
-                "runner",
-                "project",
-                "suites",
-                "suite_pattern",
-                "sources",
-            )
+                for key in (
+                    "commit",
+                    "tests",
+                    "runner",
+                    "project",
+                    "suites",
+                    "suite_pattern",
+                    "sources",
+                )
         )
         if !same_meta || document["definitions"] != reference["definitions"]
             error(
@@ -1995,9 +2038,9 @@ end
 # ---------------------------------------------------------------------------------------
 
 function option_values(
-    args::AbstractVector{<:AbstractString},
-    flag::AbstractString,
-)::Vector{String}
+        args::AbstractVector{<:AbstractString},
+        flag::AbstractString,
+    )::Vector{String}
     positions = findall(==(flag), args)
     if any(position == lastindex(args) for position in positions)
         error(flag, " needs a value")
@@ -2006,10 +2049,10 @@ function option_values(
 end
 
 function option_value(
-    args::AbstractVector{<:AbstractString},
-    flag::AbstractString,
-    fallback::AbstractString,
-)::String
+        args::AbstractVector{<:AbstractString},
+        flag::AbstractString,
+        fallback::AbstractString,
+    )::String
     values = option_values(args, flag)
     if isempty(values)
         return String(fallback)
@@ -2078,13 +2121,13 @@ function main(args::AbstractVector{<:AbstractString})::Nothing
             commit = commit,
             environment = [
                 String(first(pair)) => String(last(pair))
-                for pair in split.(option_values(args, "--env"), '='; limit = 2)
+                    for pair in split.(option_values(args, "--env"), '='; limit = 2)
             ],
         )
         return nothing
     end
     if command == "merge"
-        merge_maps(map_path, option_values(args, "--in"))
+        merge_maps(map_path, abspath.(root, option_values(args, "--in")))
         return nothing
     end
     if command in ("select", "run")
@@ -2095,11 +2138,11 @@ function main(args::AbstractVector{<:AbstractString})::Nothing
 end
 
 function select_command(
-    root::AbstractString,
-    map_path::AbstractString,
-    args::AbstractVector{<:AbstractString},
-    run_selected::Bool,
-)::Nothing
+        root::AbstractString,
+        map_path::AbstractString,
+        args::AbstractVector{<:AbstractString},
+        run_selected::Bool,
+    )::Nothing
     map = read_map(map_path)
     target = option_value(args, "--to", "")
     tip = "HEAD"
@@ -2143,10 +2186,12 @@ function select_command(
         Base.shell_escape(arguments...),
     )
     if run_selected && !isempty(names)
-        run(Cmd(
-            `$(Base.julia_cmd()) --project=$(joinpath(root, map.project)) $(joinpath(root, map.runner)) $arguments`;
-            dir = root,
-        ))
+        run(
+            Cmd(
+                `$(Base.julia_cmd()) --project=$(joinpath(root, map.project)) $(joinpath(root, map.runner)) $arguments`;
+                dir = root,
+            )
+        )
     end
     return nothing
 end
