@@ -729,9 +729,14 @@ function run_text(low::Integer, high::Integer)::String
     return string(low, '-', high)
 end
 
+"The range a `ranges_text` token such as `3` or `3-5` names."
+function parse_range(token::AbstractString)::UnitRange{Int}
+    bounds = split(token, '-')
+    return parse(Int, first(bounds)):parse(Int, last(bounds))
+end
+
 function parse_ranges(text::AbstractString)::Vector{UnitRange{Int}}
-    bounds = [split(token, '-') for token in split(text, ','; keepempty = false)]
-    return [parse(Int, first(pair)):parse(Int, last(pair)) for pair in bounds]
+    return parse_range.(split(text, ','; keepempty = false))
 end
 
 "The headers at `positions` (as `ranges_text` writes them) of a file's function list."
@@ -739,7 +744,7 @@ function headers_at(headers::AbstractVector{String}, positions::AbstractString):
     return Set(headers[position] for range in parse_ranges(positions) for position in range)
 end
 
-function read_map(path::AbstractString)::CoverageMap
+function read_map(path::AbstractString)::CoverageMap # lint: abstract-local  a TOML document is untyped
     document = TOML.parsefile(path)
     if !haskey(document, "definitions")
         error(
@@ -911,7 +916,7 @@ end
 The digest of an item's code: its modules and its parsed expression. Comments, docstrings
 and blanks do not count; a blank that changes the code (`[1 -x]`, `[1 - x]`) does.
 """
-function code_digest(item::Item)::String
+function code_digest(item::Item)::String # lint: abstract-local  a parsed expression has no static type
     expression = unlined(JS.parseall(Expr, item.text))
     return bytes2hex(SHA.sha1(string(item.scope, '\0', expression)))
 end
@@ -1713,9 +1718,10 @@ One testset's coverage run: a fresh Julia process running `runner` in `project` 
 testset's name (its path when `by_path`, else a ReTest regex) with an LCOV tracefile of its
 own, counting lines only under `covered` (an `@path` selector, so dependencies keep their
 package images). Julia 1.13 matches the selector
-against real paths: a path through a symlink counts nothing.
+against real paths: a path through a symlink counts nothing. Each run's status goes to `log`.
 """
-struct Worker
+struct Worker{L <: IO}
+    log::L
     root::String
     runner::String
     project::String
@@ -1726,6 +1732,14 @@ struct Worker
     covered::String
     environment::Vector{Pair{String, String}}
     spans::Dict{String, Vector{UnitRange{Int}}}
+end
+
+"A testset's coverage run: its status, its time and, per file, the positions of the functions it ran."
+struct Mapped
+    name::String
+    status::String
+    ms::Int
+    functions::Dict{String, String}
 end
 
 """
@@ -1763,7 +1777,7 @@ function file_functions(snapshot::Snapshot, path::AbstractString)::Vector{Item}
     return [item for item in items_at(snapshot, path, true) if item.kind == :function]
 end
 
-function (worker::Worker)(name::AbstractString)::Pair{String, Dict{String, Any}}
+function (worker::Worker)(name::AbstractString)::Mapped
     stem = first(bytes2hex(SHA.sha1(name)), 12)
     # A fresh tracefile name, so no earlier run's coverage can be read.
     info = tempname(worker.logs) * ".info"
@@ -1778,7 +1792,7 @@ function (worker::Worker)(name::AbstractString)::Pair{String, Dict{String, Any}}
         worker.environment...,
     )
     started = time_ns()
-    process = run(pipeline(command; stdout = log, stderr = log); wait = false)
+    process::Base.Process = run(pipeline(command; stdout = log, stderr = log); wait = false)
     outcome = timedwait(Exited(process), worker.timeout)
     if outcome == :timed_out
         kill(process, Base.SIGINT)
@@ -1803,14 +1817,24 @@ function (worker::Worker)(name::AbstractString)::Pair{String, Dict{String, Any}}
     if status == "ok" && isempty(lines)
         status = "no-coverage"
     end
-    println(stderr, "[Fallout] ", status, " ", milliseconds, " ms  ", name)
-    return String(name) => Dict{String, Any}(
-        "status" => status,
-        "ms" => milliseconds,
-        "functions" => Dict{String, Any}(
+    println(worker.log, "[Fallout] ", status, " ", milliseconds, " ms  ", name)
+    return Mapped(
+        String(name),
+        status,
+        milliseconds,
+        Dict{String, String}(
             file => executed_positions(covered, get(worker.spans, file, UnitRange{Int}[]))
                 for (file, covered) in lines
-        )
+        ),
+    )
+end
+
+"The TOML table of a testset's run."
+function mapped_table(result::Mapped)::Dict{String, Union{String, Int, typeof(result.functions)}}
+    return Dict{String, Union{String, Int, typeof(result.functions)}}(
+        "status" => result.status,
+        "ms" => result.ms,
+        "functions" => result.functions,
     )
 end
 
@@ -1825,7 +1849,7 @@ function jl_files(root::AbstractString, dir::AbstractString)::Vector{String}
 end
 
 """
-    build_map(root, out; tests, suites, suite_pattern, sources, runner, project, jobs, timeout, only, shard, shards, commit, environment)
+    build_map(root, out; tests, suites, suite_pattern, sources, runner, project, jobs, timeout, only, shard, shards, commit, environment, log)
 
 Run every top-level testset of `tests` (found statically, following literal includes), or
 with `suites` every file under that directory whose name matches `suite_pattern`, in its
@@ -1836,7 +1860,7 @@ maps). The shard's smallest testset runs alone first, so the coverage-flagged
 precompilation finishes before the rest start together. The map lists the functions of every
 `.jl` file under `sources` (as parsed in `root`) and records, per testset, which ran.
 """
-function build_map(
+function build_map( # lint: abstract-local  a TOML document is untyped
         root::AbstractString,
         out::AbstractString;
         tests::AbstractString,
@@ -1852,6 +1876,7 @@ function build_map(
         shards::Integer,
         commit::AbstractString,
         environment::AbstractVector{Pair{String, String}},
+        log::IO,
     )::Nothing
     located = test_items(Snapshot(String(root), ""), tests, suites, suite_pattern)
     testsets = [entry for entry in located if entry.item.kind == :testset]
@@ -1873,12 +1898,12 @@ function build_map(
     ]
     for place in hidden
         println(
-            stderr,
+            log,
             "[Fallout] warning: testsets inside control flow are not mapped: ",
             place,
         )
     end
-    spans = Dict(
+    spans = Dict{String, Int}(
         name => sum(
             entry.item.last - entry.item.first
                 for entry in testsets
@@ -1886,10 +1911,9 @@ function build_map(
         )
             for name in unique([entry.item.name for entry in testsets])
     )
-    names = first.(sort(collect(spans); by = last))
-    names = [
+    names = String[
         name
-            for name in names
+            for name in first.(sort(collect(spans); by = last))
             if isempty(only) || any(occursin(part, name) for part in only)
     ][shard:shards:end]
     if isempty(names)
@@ -1906,17 +1930,18 @@ function build_map(
     mkpath(logs)
     covered = realpath(joinpath(root, length(sources) == 1 ? first(sources) : ""))
     snapshot = Snapshot(String(root), "")
-    paths = reduce(vcat, (jl_files(root, dir) for dir in sources); init = String[])
-    functions = Dict(path => file_functions(snapshot, path) for path in paths)
-    definitions = Dict(
+    paths = String[path for dir in sources for path in jl_files(root, dir)]
+    functions = Dict{String, Vector{Item}}(path => file_functions(snapshot, path) for path in paths)
+    definitions = Dict{String, Vector{String}}(
         path => String[item.header for item in items]
             for (path, items) in functions
     )
-    line_spans = Dict(
+    line_spans = Dict{String, Vector{UnitRange{Int}}}(
         path => UnitRange{Int}[item.first:item.last for item in items]
             for (path, items) in functions
     )
     worker = Worker(
+        log,
         String(root),
         String(runner),
         String(project),
@@ -1928,10 +1953,10 @@ function build_map(
         environment,
         line_spans,
     )
-    results = vcat(
-        [worker(first(names))],
-        asyncmap(worker, reverse(names[2:end]); ntasks = jobs),
-    )
+    results = Mapped[
+        worker(first(names));
+        asyncmap(worker, reverse(names[2:end]); ntasks = jobs)
+    ]
     document = Dict{String, Any}(
         "meta" => Dict{String, Any}(
             "commit" => commit,
@@ -1945,18 +1970,14 @@ function build_map(
             "sources" => String[sources...],
         ),
         "definitions" => definitions,
-        "testsets" => Dict{String, Any}(results),
+        "testsets" => Dict(result.name => mapped_table(result) for result in results),
     )
     buffer = IOBuffer()
     TOML.print(buffer, document; sorted = true)
     write(out, take!(buffer))
-    unhealthy = [
-        name => result["status"]
-            for (name, result) in results
-            if result["status"] != "ok"
-    ]
+    unhealthy = Mapped[result for result in results if result.status != "ok"]
     println(
-        stderr,
+        log,
         "[Fallout] wrote ",
         out,
         ": ",
@@ -1965,19 +1986,23 @@ function build_map(
         length(unhealthy),
         " not ok",
     )
-    for (name, status) in unhealthy
-        println(stderr, "[Fallout]   ", status, "  ", name)
+    for result in unhealthy
+        println(log, "[Fallout]   ", result.status, "  ", result.name)
     end
     return nothing
 end
 
 """
-    merge_maps(out, inputs)
+    merge_maps(out, inputs, log)
 
-Join the maps of a sharded build into one. Every shard must come from the same commit and
-list the same definitions; a testset mapped twice is an error.
+Join the maps of a sharded build into one and report it to `log`. Every shard must come from
+the same commit and list the same definitions; a testset mapped twice is an error.
 """
-function merge_maps(out::AbstractString, inputs::AbstractVector{<:AbstractString})::Nothing
+function merge_maps( # lint: abstract-local  a TOML document is untyped
+        out::AbstractString,
+        inputs::AbstractVector{<:AbstractString},
+        log::IO,
+    )::Nothing
     documents = [TOML.parsefile(input) for input in inputs]
     reference = first(documents)
     for (input, document) in zip(inputs, documents)
@@ -2021,7 +2046,7 @@ function merge_maps(out::AbstractString, inputs::AbstractVector{<:AbstractString
     TOML.print(buffer, merged; sorted = true)
     write(out, take!(buffer))
     println(
-        stderr,
+        log,
         "[Fallout] merged ",
         length(inputs),
         " maps into ",
@@ -2101,7 +2126,7 @@ function main(args::AbstractVector{<:AbstractString})::Nothing
         else
             commit = last(commits)
         end
-        build_map(
+        build_map( # lint: hidden-input  the command line reports to the process's streams
             root,
             map_path;
             tests = path_option(option_value(args, "--tests", "test/runtests.jl")),
@@ -2123,15 +2148,16 @@ function main(args::AbstractVector{<:AbstractString})::Nothing
                 String(first(pair)) => String(last(pair))
                     for pair in split.(option_values(args, "--env"), '='; limit = 2)
             ],
+            log = stderr,
         )
         return nothing
     end
     if command == "merge"
-        merge_maps(map_path, abspath.(root, option_values(args, "--in")))
+        merge_maps(map_path, abspath.(root, option_values(args, "--in")), stderr) # lint: hidden-input  the command line reports to the process's streams
         return nothing
     end
     if command in ("select", "run")
-        select_command(root, map_path, args, command == "run")
+        select_command(root, map_path, args, command == "run", stdout) # lint: hidden-input  the command line reports to the process's streams
         return nothing
     end
     error(USAGE)
@@ -2142,6 +2168,7 @@ function select_command(
         map_path::AbstractString,
         args::AbstractVector{<:AbstractString},
         run_selected::Bool,
+        io::IO,
     )::Nothing
     map = read_map(map_path)
     target = option_value(args, "--to", "")
@@ -2171,13 +2198,14 @@ function select_command(
     end
     base = strip(git(root, "rev-parse", "--verify", base * "^{commit}"))
     selection = select_testsets(root, map, String(base), String(target))
-    report(stdout, map, selection, base, target)
+    report(io, map, selection, base, target)
     names = sort(unique(first.(selection.reasons)))
     arguments = runner_arguments(!isempty(map.suites), names)
     if isempty(map.suites)
-        println("pattern: ", only(arguments))
+        println(io, "pattern: ", only(arguments))
     end
     println(
+        io,
         "run: julia --project=",
         map.project,
         " ",
@@ -2197,5 +2225,6 @@ function select_command(
 end
 
 include("units.jl")
+include("precompile.jl")
 
 end # module

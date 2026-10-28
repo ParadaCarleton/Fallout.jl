@@ -293,19 +293,24 @@ end
     write(joinpath(root, "two.toml"), shard_map("c0ffee", "runs g"))
     write(joinpath(root, "again.toml"), shard_map("c0ffee", "runs g"))
     write(joinpath(root, "other.toml"), shard_map("beef", "uses S"))
+    log = IOBuffer()
     merge_maps(
         joinpath(root, "map.toml"),
         [joinpath(root, "one.toml"), joinpath(root, "two.toml")],
+        log,
     )
+    @test occursin("merged 2 maps", String(take!(log)))
     @test sort(collect(keys(read_map(joinpath(root, "map.toml")).testsets))) ==
         ["runs f", "runs g"]
     @test_throws "more than one shard" merge_maps(
         joinpath(root, "map.toml"),
         [joinpath(root, "two.toml"), joinpath(root, "again.toml")],
+        devnull,
     )
     @test_throws "another commit" merge_maps(
         joinpath(root, "map.toml"),
         [joinpath(root, "one.toml"), joinpath(root, "other.toml")],
+        devnull,
     )
     @test read_map(joinpath(root, "one.toml")).project == "."
     write(
@@ -319,6 +324,7 @@ end
     @test_throws "other files" merge_maps(
         joinpath(root, "map.toml"),
         [joinpath(root, "one.toml"), joinpath(root, "nested.toml")],
+        devnull,
     )
 end
 
