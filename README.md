@@ -163,8 +163,9 @@ move line numbers but not headers, so a map stays valid while the code around it
   `include`s the package's files, instead of loading the package with `using`, marks every
   function it defines as executed by every testset.
 - Names are matched as identifiers, with no scope. A local variable that shares a
-  changed global's name selects too much. A name reached only through `getfield`,
-  `@eval` interpolation or a string selects too little.
+  changed global's name selects too much. A name written as `:TOL`, `var"TOL"` or
+  `Symbol("TOL")` counts as a mention; a name built at run time (`Symbol(prefix, "TOL")`,
+  a loop over `names(M)`) selects too little.
 - Testsets are run by name. A testset with an interpolated name, or one inside a
   loop, cannot be mapped: `build` stops on the first and warns on the second.
 - Code outside the mapped source directories (`scripts/`, `benchmarks/`, registered

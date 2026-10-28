@@ -86,11 +86,16 @@ function identifier_texts(node::JS.SyntaxNode)::Vector{String}
         end
         return String[]
     end
-    return reduce(
-        vcat,
-        (identifier_texts(part) for part in JS.children(node));
-        init = String[],
-    )
+    parts = JS.children(node)
+    inner = reduce(vcat, (identifier_texts(part) for part in parts); init = String[])
+    # `Symbol("TOL")` names `TOL` as `:TOL` does.
+    if JS.kind(node) == K"call" && length(parts) == 2
+        callee, argument = parts
+        if String(JS.sourcetext(callee)) == "Symbol" && !isempty(literal_string(argument))
+            return vcat(inner, literal_string(argument))
+        end
+    end
+    return inner
 end
 
 "The value of a string literal with no interpolation; empty for anything else."
