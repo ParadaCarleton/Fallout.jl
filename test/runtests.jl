@@ -626,6 +626,12 @@ end
     @test described("@time @testset \"timed\" begin end") == ["testset timed timed"]
     @test described("@testset NAME begin end") == ["testset  "]
     @test isempty(described("# only a comment\n"))
+    for spelled in ("getfield(M, :TOL)", "M.TOL", "var\"TOL\"", "getglobal(M, Symbol(\"TOL\"))")
+        @test "TOL" in only(Fallout.source_items("f() = $spelled", "q.jl")).mentions
+    end
+    for built in ("Symbol(prefix, \"TOL\")", "Symbol(\"TO\" * \"L\")", "\"TOL\"")
+        @test !("TOL" in only(Fallout.source_items("f() = $built", "q.jl")).mentions)
+    end
     @test only(Fallout.source_items("module P\nmodule A\ng() = 1\nend\nend", "q.jl")).scope == "P.A"
     @test_throws "cannot parse q.jl" described("f(x = \n")
 
