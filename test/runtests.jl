@@ -603,6 +603,48 @@ end
     @test path_option("pkg/../test") == "test"
 end
 
+"Each top-level item of `text` as `kind name key,key`."
+function described(text::AbstractString)::Vector{String}
+    return [
+        string(item.kind, " ", item.name, " ", join(item.keys, ','))
+            for item in Fallout.source_items(text, "q.jl")
+    ]
+end
+
+@testset "the parser names every kind of top-level item" begin
+    @test described("x ⊕ y = x + y") == ["function ⊕ ⊕"]
+    @test described("(s::S)(y) = y") == ["function S S"]
+    @test described("(::S{T})(y) where {T} = y") == ["function S S"]
+    @test described("f(x)::Int = 1") == ["function f f"]
+    @test described("const a, (b, c) = 1, (2, 3)") == ["binding  a,b,c"]
+    @test described("data = [1]") == ["binding  data"]
+    @test described("A.field = 1") == ["binding  "]
+    @test described("macro twice(x)\n    :(2 * \$x)\nend") == ["binding twice twice"]
+    @test described("@inline @noinline f(x) = x") == ["function f f"]
+    @test described("@marker") == ["other  "]
+    @test described("42") == ["other  "]
+    @test described("@time @testset \"timed\" begin end") == ["testset timed timed"]
+    @test described("@testset NAME begin end") == ["testset  "]
+    @test isempty(described("# only a comment\n"))
+    @test_throws "cannot parse q.jl" described("f(x = \n")
+
+    items = Fallout.source_items(
+        "struct S end\nconst V = Vector{S}\nconst W = V\nk(v::W) = 1\ninclude(\"a.jl\")",
+        "q.jl",
+    )
+    located = [Fallout.Located("q.jl", item) for item in items if item.kind != :function]
+    @test Fallout.name_closure(Set(["S"]), located) == Set(["S", "V", "W"])
+    @test Fallout.binding_keys(last(items)) == String[]
+    @test Fallout.binding_keys(only(item for item in items if item.kind == :function)) == ["k"]
+    @test ranges_text(Int[]) == ""
+    @test Fallout.path_class("test/data.csv", Set{String}(), "test", ["src"]) == :fixture
+    @test Fallout.parse_file_change("a/n.jl b/n.jl\nnew file mode 100644\n").status == :added
+    @test Fallout.parse_file_change("a/d.jl b/d.jl\ndeleted file mode 100644\n").status == :deleted
+    old = joinpath(mktempdir(), "old.toml")
+    write(old, "[meta]\ncommit = \"abc\"\n")
+    @test_throws "rebuild it with `build`" read_map(old)
+end
+
 """
 A runner that runs the top-level testsets of the fixture's test files whose `/name`
 matches the regex `ARGS[1]`, as ReTest does.
@@ -639,7 +681,8 @@ end
     tests = read(joinpath(root, "test/runtests.jl"), String)
     looped = "for round in 1:1\n    @testset \"looped\" begin end\nend\n"
     write_file(root, "test/runtests.jl", tests * looped)
-    write_file(root, "test/slow.jl", "@testset \"slow\" begin\n    sleep(600)\nend\n")
+    stubborn = "@testset \"stubborn\" begin\n    Base.exit_on_sigint(false)\n    try\n        sleep(600)\n    catch\n        sleep(600)\n    end\nend\n"
+    write_file(root, "test/slow.jl", "@testset \"slow\" begin\n    sleep(600)\nend\n" * stubborn)
     write_file(root, "test/computed.jl", "using Test\n@testset \"\$(1 + 1)\" begin end\n")
     git_run(root, "add", "-A")
     git_run(root, "commit", "-q", "-m", "runner")
@@ -662,7 +705,8 @@ end
     @test_throws "more than one shard" Fallout.main(["merge", "--root", root, "--map", "twice.toml", "--in", "shard-1.toml", "--in", "shard-1.toml"])
 
     Fallout.main(["build", common..., "--map", "slow.toml", "--tests", "test/slow.jl", "--timeout", "1"])
-    @test read_map(joinpath(root, "slow.toml")).testsets["slow"].status == "timeout"
+    slow = read_map(joinpath(root, "slow.toml"))
+    @test all(slow.testsets[name].status == "timeout" for name in ("slow", "stubborn"))
     @test_throws "no testset matches" Fallout.main(["build", common..., "--only", "absent"])
     @test_throws "computed name" Fallout.main(["build", common..., "--tests", "test/computed.jl"])
 
@@ -670,6 +714,8 @@ end
     selection = ["--root", root, "--map", "built.toml", "--base", "HEAD"]
     @test occursin("pattern: ", printed(["select", selection...]))
     @test occursin("runs g", printed(["run", selection...]))
+    write_file(root, "Project.toml", "name = \"P\"\nversion = \"0.1.0\"\n")
+    @test occursin("FULL SUITE: Project.toml", printed(["select", selection...]))
     @test_throws "is not a git checkout" Fallout.main(["select", "--root", joinpath(root, "src"), "--map", "../built.toml", "--base", "HEAD"])
     @test_throws "usage" Fallout.main(String[])
     @test_throws "needs a value" Fallout.main(["build", "--map"])

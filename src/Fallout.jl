@@ -121,21 +121,26 @@ function include_paths(node::JS.SyntaxNode)::Vector{String}
     return reduce(vcat, (include_paths(part) for part in parts); init = String[])
 end
 
-"The name a function signature defines (a callable object's methods share `(callable)`)."
+"The name a function signature defines; a callable object's methods are known by its type."
 function callee_name(node::JS.SyntaxNode)::String
     kind = JS.kind(node)
+    parts = JS.children(node)
     if kind == K"call"
-        parts = JS.children(node)
         if JS.is_prefix_call(node)
             return callee_name(first(parts))
         end
-        return String(JS.sourcetext(parts[2]))
+        _, operator = parts
+        return String(JS.sourcetext(operator))
     end
-    if kind in (K"where", K"::", K"curly")
-        return callee_name(first(JS.children(node)))
+    if kind in (K"where", K"curly")
+        return callee_name(first(parts))
     end
-    if kind == K"parens"
-        return "(callable)"
+    if kind == K"::"
+        # `f(x)::T` annotates a return type; `(s::S)(x)` and `(::S)(x)` define methods of `S`.
+        if JS.kind(first(parts)) == K"call"
+            return callee_name(first(parts))
+        end
+        return callee_name(last(parts))
     end
     if kind == K"."
         # `Base.:(==)` and `Base.:+` define `==` and `+`, the names callers mention.
@@ -309,22 +314,22 @@ The syntax tree of a file; a file that does not parse is an error naming `label`
 carrying the parser's message.
 """
 function parse_source(text::AbstractString, label::AbstractString)::JS.SyntaxNode
-    try
-        return JS.parseall(JS.SyntaxNode, text; filename = label)
-    catch exception
-        if exception isa JS.ParseError
-            error("cannot parse ", label, ":\n", sprint(showerror, exception))
-        end
-        rethrow()
+    stream = JS.ParseStream(text)
+    JS.parse!(stream; rule = :all)
+    if JS.any_error(stream)
+        error(
+            "cannot parse ",
+            label,
+            ":\n",
+            sprint(showerror, JS.ParseError(stream; filename = label)),
+        )
     end
+    return JS.build_tree(JS.SyntaxNode, stream; filename = label)
 end
 
 "The top-level items of a file (modules are entered; their own line is not an item)."
 function source_items(text::AbstractString, label::AbstractString)::Vector{Item}
     parts = JS.children(parse_source(text, label))
-    if isnothing(parts)
-        return Item[]
-    end
     return reduce(vcat, (node_items(part, 0:-1, "") for part in parts); init = Item[])
 end
 
@@ -1775,7 +1780,7 @@ function (worker::Worker)(name::AbstractString)::Pair{String, Dict{String, Any}}
     outcome = timedwait(Exited(process), worker.timeout)
     if outcome == :timed_out
         kill(process, Base.SIGINT)
-        if timedwait(Exited(process), 120) == :timed_out
+        if timedwait(Exited(process), min(120, worker.timeout)) == :timed_out
             kill(process, Base.SIGKILL)
         end
     end

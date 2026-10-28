@@ -70,7 +70,7 @@ Options (`--root` defaults to the current directory, `--map` to `ROOT/test-impac
 | `--runner FILE` | build, run | Runner script (default `test/runtests.jl`) |
 | `--project DIR` | build | Julia project the runner runs in, relative to `--root` (default `.`); recorded in the map, so `run` uses it too |
 | `--jobs N` | build | Testsets run at once |
-| `--timeout SECONDS` | build | Per-testset limit; on timeout the process gets SIGINT, so it still writes its coverage |
+| `--timeout SECONDS` | build | Per-testset limit; on timeout the process gets SIGINT, so it still writes its coverage, and SIGKILL if it still runs after another `SECONDS` (at most 120) |
 | `--only SUBSTRING` | build | Map only matching testsets, for a smoke run |
 | `--shard K/N` | build | Map shard K of N |
 | `--commit REV` | build | Commit recorded in the map (default `git rev-parse HEAD`) |
