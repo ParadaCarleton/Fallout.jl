@@ -3,8 +3,18 @@
 [![CI](https://github.com/ParadaCarleton/Fallout.jl/actions/workflows/CI.yml/badge.svg)](https://github.com/ParadaCarleton/Fallout.jl/actions/workflows/CI.yml)
 
 Test impact analysis (regression test selection) for Julia packages: after an edit, run
-only the testsets the edit can affect. It uses only the standard library and never loads
-the package under test, so it runs from any environment (`julia >= 1.12`).
+only the testsets the edit can affect. The selector never loads the package under test,
+so it runs from any environment (`julia >= 1.12`).
+
+For long tests, units cache the expensive parts of a testset and reuse them while the
+code they ran is unchanged:
+
+```julia
+const CACHE = unit_cache()   # under --code-coverage=@. or Pkg.test(coverage = true)
+replicates = [unit(simulate_replicate, CACHE, (; seed)) for seed in 1:200]
+```
+
+See [docs/units.md](docs/units.md) for how to write tests that use them.
 
 It expects a test entry file (default `test/runtests.jl`) that holds top-level `@testset`s
 with literal names, and a runner script (default `test/runtests.jl`) that runs the testsets

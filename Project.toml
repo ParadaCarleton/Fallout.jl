@@ -1,15 +1,19 @@
 name = "Fallout"
 uuid = "274ebb9d-e75a-429a-8580-dde01b904bae"
-version = "0.2.0"
+version = "0.3.0"
 
 [deps]
 Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
 SHA = "ea8e919c-243c-51af-8825-aaa63cd721ce"
+Serialization = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
+StableHashTraits = "c5dd0088-6c3f-4803-b00e-f31a60c170fa"
 TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
 
 [compat]
 Dates = "1"
 SHA = "0.7, 1"
+Serialization = "1"
+StableHashTraits = "2"
 TOML = "1"
 Test = "1"
 julia = "1.12"

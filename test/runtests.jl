@@ -1,7 +1,17 @@
 # Self-check of the selector on a throwaway git repository with a hand-written map:
 #     julia --startup-file=no --project=. -e 'using Pkg; Pkg.test()'   (from the package's directory)
 using Test
-using Fallout: Fallout, executed_positions, lcov_files, merge_maps, parse_ranges, ranges_text, read_map, retest_pattern, runner_arguments, select_testsets
+using Fallout:
+    Fallout,
+    executed_positions,
+    lcov_files,
+    merge_maps,
+    parse_ranges,
+    ranges_text,
+    read_map,
+    retest_pattern,
+    runner_arguments,
+    select_testsets
 
 const PACKAGE = """
 module P
@@ -40,7 +50,11 @@ function git_run(root::AbstractString, args::AbstractString...)::String
     return read(command, String)
 end
 
-function write_file(root::AbstractString, path::AbstractString, text::AbstractString)::Nothing
+function write_file(
+    root::AbstractString,
+    path::AbstractString,
+    text::AbstractString,
+)::Nothing
     mkpath(dirname(joinpath(root, path)))
     write(joinpath(root, path), text)
     return nothing
@@ -86,7 +100,12 @@ function fixture(root::AbstractString)::String
 end
 
 "The selection after replacing `old` by `new` in `path` (working tree, not committed)."
-function selected_after(root::AbstractString, path::AbstractString, old::AbstractString, new::AbstractString)::Fallout.Selection
+function selected_after(
+    root::AbstractString,
+    path::AbstractString,
+    old::AbstractString,
+    new::AbstractString,
+)::Fallout.Selection
     original = read(joinpath(root, path), String)
     @assert occursin(old, original)
     write_file(root, path, replace(original, old => new))
@@ -98,20 +117,37 @@ function selected_after(root::AbstractString, path::AbstractString, old::Abstrac
     end
 end
 
-names_in(selection::Fallout.Selection)::Vector{String} = sort(unique(first.(selection.reasons)))
+names_in(selection::Fallout.Selection)::Vector{String} = sort(unique(
+    first.(selection.reasons),
+))
 
 @testset "selector" begin
     root = mktempdir()
     fixture(root)
 
     @test names_in(selected_after(root, "src/P.jl", "x + 1", "x + 2")) == ["runs f"]
-    @test isempty(names_in(selected_after(root, "src/P.jl", "\"A thing.\"", "\"Another thing.\"")))
-    @test isempty(names_in(selected_after(root, "src/P.jl", "f(x) = x + 1", "f(x) = x + 1 # note")))
+    @test isempty(names_in(selected_after(
+        root,
+        "src/P.jl",
+        "\"A thing.\"",
+        "\"Another thing.\"",
+    )))
+    @test isempty(names_in(selected_after(
+        root,
+        "src/P.jl",
+        "f(x) = x + 1",
+        "f(x) = x + 1 # note",
+    )))
 
     struct_change = selected_after(root, "src/P.jl", "a::Int", "a::Float32")
     @test names_in(struct_change) == ["uses S"]
 
-    dispatch = selected_after(root, "src/P.jl", "function g(x::Int)", "function g(x::Integer)")
+    dispatch = selected_after(
+        root,
+        "src/P.jl",
+        "function g(x::Int)",
+        "function g(x::Integer)",
+    )
     @test names_in(dispatch) == ["runs g"]
     @test any(occursin("dispatch", last(pair)) for pair in dispatch.reasons)
 
@@ -119,10 +155,27 @@ names_in(selection::Fallout.Selection)::Vector{String} = sort(unique(first.(sele
     @test isempty(names_in(unused_change))
     @test length(unused_change.uncovered) == 1
 
-    @test names_in(selected_after(root, "test/runtests.jl", "P.g(1) == 2", "P.g(2) == 4")) == ["runs g"]
-    @test names_in(selected_after(root, "test/runtests.jl", "helper() = 1", "helper() = 2")) == ["helper user"]
+    @test names_in(selected_after(
+        root,
+        "test/runtests.jl",
+        "P.g(1) == 2",
+        "P.g(2) == 4",
+    )) ==
+        ["runs g"]
+    @test names_in(selected_after(
+        root,
+        "test/runtests.jl",
+        "helper() = 1",
+        "helper() = 2",
+    )) ==
+        ["helper user"]
 
-    full = selected_after(root, "Project.toml", "name = \"P\"", "name = \"P\"\nversion = \"0.1.0\"")
+    full = selected_after(
+        root,
+        "Project.toml",
+        "name = \"P\"",
+        "name = \"P\"\nversion = \"0.1.0\"",
+    )
     @test names_in(full) == ["helper user", "runs f", "runs g", "uses S"]
     @test !isempty(full.full)
 
@@ -133,14 +186,28 @@ end
     root = mktempdir()
     commit = fixture(root)
     # `h` mentions `S`: an import of `S` reaches it only by dropping the name.
-    @test isempty(names_in(selected_after(root, "src/P.jl", "module P\n", "module P\nusing Q: S\n")))
+    @test isempty(names_in(selected_after(
+        root,
+        "src/P.jl",
+        "module P\n",
+        "module P\nusing Q: S\n",
+    )))
 
     write_file(root, "src/P.jl", replace(PACKAGE, "module P\n" => "module P\nusing Q: S\n"))
     git_run(root, "commit", "-q", "-am", "import S")
     imported = strip(git_run(root, "rev-parse", "HEAD"))
-    write_file(root, "map.toml", replace(read(joinpath(root, "map.toml"), String), commit => imported))
+    write_file(
+        root,
+        "map.toml",
+        replace(read(joinpath(root, "map.toml"), String), commit => imported),
+    )
     @test names_in(selected_after(root, "src/P.jl", "using Q: S\n", "")) == ["uses S"]
-    @test isempty(names_in(selected_after(root, "src/P.jl", "using Q: S\n", "using Q: S, T\n")))
+    @test isempty(names_in(selected_after(
+        root,
+        "src/P.jl",
+        "using Q: S\n",
+        "using Q: S, T\n",
+    )))
 end
 
 @testset "pattern and coverage records" begin
@@ -183,24 +250,51 @@ end
     write(joinpath(root, "two.toml"), shard_map("c0ffee", "runs g"))
     write(joinpath(root, "again.toml"), shard_map("c0ffee", "runs g"))
     write(joinpath(root, "other.toml"), shard_map("beef", "uses S"))
-    merge_maps(joinpath(root, "map.toml"), [joinpath(root, "one.toml"), joinpath(root, "two.toml")])
-    @test sort(collect(keys(read_map(joinpath(root, "map.toml")).testsets))) == ["runs f", "runs g"]
-    @test_throws "more than one shard" merge_maps(joinpath(root, "map.toml"), [joinpath(root, "two.toml"), joinpath(root, "again.toml")])
-    @test_throws "another commit" merge_maps(joinpath(root, "map.toml"), [joinpath(root, "one.toml"), joinpath(root, "other.toml")])
+    merge_maps(
+        joinpath(root, "map.toml"),
+        [joinpath(root, "one.toml"), joinpath(root, "two.toml")],
+    )
+    @test sort(collect(keys(read_map(joinpath(root, "map.toml")).testsets))) ==
+        ["runs f", "runs g"]
+    @test_throws "more than one shard" merge_maps(
+        joinpath(root, "map.toml"),
+        [joinpath(root, "two.toml"), joinpath(root, "again.toml")],
+    )
+    @test_throws "another commit" merge_maps(
+        joinpath(root, "map.toml"),
+        [joinpath(root, "one.toml"), joinpath(root, "other.toml")],
+    )
     @test read_map(joinpath(root, "one.toml")).project == "."
-    write(joinpath(root, "nested.toml"), replace(shard_map("c0ffee", "uses S"), "[definitions]" => "project = \"test\"\n[definitions]"))
+    write(
+        joinpath(root, "nested.toml"),
+        replace(
+            shard_map("c0ffee", "uses S"),
+            "[definitions]" => "project = \"test\"\n[definitions]",
+        ),
+    )
     @test read_map(joinpath(root, "nested.toml")).project == "test"
-    @test_throws "other files" merge_maps(joinpath(root, "map.toml"), [joinpath(root, "one.toml"), joinpath(root, "nested.toml")])
+    @test_throws "other files" merge_maps(
+        joinpath(root, "map.toml"),
+        [joinpath(root, "one.toml"), joinpath(root, "nested.toml")],
+    )
 end
 
 @testset "identity survives an unrelated edit above a covered function" begin
     root = mktempdir()
     fixture(root)
-    write_file(root, "src/P.jl", replace(PACKAGE, "f(x) = x + 1" => "extra(x) = x\nf(x) = x + 1"))
+    write_file(
+        root,
+        "src/P.jl",
+        replace(PACKAGE, "f(x) = x + 1" => "extra(x) = x\nf(x) = x + 1"),
+    )
     git_run(root, "commit", "-q", "-a", "-m", "unrelated edit above f")
     base = strip(git_run(root, "rev-parse", "HEAD"))
     map = read_map(joinpath(root, "map.toml"))
-    write_file(root, "src/P.jl", replace(read(joinpath(root, "src/P.jl"), String), "x + 1" => "x + 2"))
+    write_file(
+        root,
+        "src/P.jl",
+        replace(read(joinpath(root, "src/P.jl"), String), "x + 1" => "x + 2"),
+    )
     @test names_in(select_testsets(root, map, base, "")) == ["runs f"]
 end
 
@@ -222,7 +316,14 @@ end
     @test names_in(select_testsets(root, map, base, "")) == ["uses S"]
 
     write_file(root, "src/Q.jl", "h(s::S) = s.a\n")
-    write_file(root, "src/P.jl", replace(read(joinpath(root, "src/P.jl"), String), "extra(x) = x" => "extra(x) = 2x"))
+    write_file(
+        root,
+        "src/P.jl",
+        replace(
+            read(joinpath(root, "src/P.jl"), String),
+            "extra(x) = x" => "extra(x) = 2x",
+        ),
+    )
     lacking = select_testsets(root, map, base, "")
     @test isempty(names_in(lacking))
     @test any(occursin("`extra`", line) for line in lacking.uncovered)
@@ -243,12 +344,26 @@ end
     root = mktempdir()
     first_commit = fixture(root)
     git_run(root, "branch", "-M", "trunk")
-    write_file(root, "src/P.jl", replace(PACKAGE, "f(x) = x + 1" => "extra(x) = x\nf(x) = x + 1"))
+    write_file(
+        root,
+        "src/P.jl",
+        replace(PACKAGE, "f(x) = x + 1" => "extra(x) = x\nf(x) = x + 1"),
+    )
     git_run(root, "commit", "-q", "-a", "-m", "trunk moves on")
     git_run(root, "checkout", "-q", "-b", "topic", first_commit)
     write_file(root, "src/P.jl", replace(PACKAGE, "x + 1" => "x + 2"))
     git_run(root, "commit", "-q", "-a", "-m", "topic edits f")
-    arguments = ["select", "--root", root, "--map", joinpath(root, "map.toml"), "--trunk", "trunk", "--to", "topic"]
+    arguments = [
+        "select",
+        "--root",
+        root,
+        "--map",
+        joinpath(root, "map.toml"),
+        "--trunk",
+        "trunk",
+        "--to",
+        "topic",
+    ]
 
     text = printed_by_main(arguments)
     @test occursin("diff $(first(first_commit, 12)) ->", text)
@@ -271,7 +386,8 @@ end
     Wrapped(value::Float64) = error("leak: ", scan_sources())
     """
     write_file(root, "test/helpers.jl", helpers)
-    tests = replace(TESTS, "using Test\n" => "using Test\ninclude(\"helpers.jl\")\n") * """
+    tests = replace(TESTS, "using Test\n" => "using Test\ninclude(\"helpers.jl\")\n") *
+        """
     @testset "scans" begin
         @test !isempty(scan_sources())
     end
@@ -283,9 +399,17 @@ end
     git_run(root, "add", "-A")
     git_run(root, "commit", "-q", "-m", "helpers")
     base = strip(git_run(root, "rev-parse", "HEAD"))
-    write_file(root, "src/P.jl", replace(PACKAGE, "unused(x) = x" => "unused(x) = x # note\nother(x) = x"))
+    write_file(
+        root,
+        "src/P.jl",
+        replace(PACKAGE, "unused(x) = x" => "unused(x) = x # note\nother(x) = x"),
+    )
     selection = select_testsets(root, read_map(joinpath(root, "map.toml")), base, "")
-    static = sort([first(pair) for pair in selection.reasons if startswith(last(pair), "static analysis")])
+    static = sort([
+        first(pair)
+        for pair in selection.reasons
+        if startswith(last(pair), "static analysis")
+    ])
     @test static == ["scans"]
 end
 
@@ -302,10 +426,22 @@ function suite_fixture(root::AbstractString)::String
     write_file(root, "src/P.jl", PACKAGE)
     write_file(root, "test/runtests.jl", "for suite in ARGS\n    include(suite)\nend\n")
     write_file(root, "test/support/helper.jl", "helper() = 1\n")
-    write_file(root, "test/a/test_f.jl", "using Test\n@testset \"f\" begin\n    @test P.f(1) == 2\nend\n")
-    write_file(root, "test/test_g.jl", "using Test\ninclude(\"support/helper.jl\")\n@testset \"g\" begin\n    @test P.g(helper()) == 2\nend\n")
+    write_file(
+        root,
+        "test/a/test_f.jl",
+        "using Test\n@testset \"f\" begin\n    @test P.f(1) == 2\nend\n",
+    )
+    write_file(
+        root,
+        "test/test_g.jl",
+        "using Test\ninclude(\"support/helper.jl\")\n@testset \"g\" begin\n    @test P.g(helper()) == 2\nend\n",
+    )
     write_file(root, "test/test_h.jl", "include(\"support/setup.jl\")\n")
-    write_file(root, "test/support/setup.jl", "using Test\nsetup() = 1\n@testset \"inner\" begin\n    @test setup() == 1\nend\n")
+    write_file(
+        root,
+        "test/support/setup.jl",
+        "using Test\nsetup() = 1\n@testset \"inner\" begin\n    @test setup() == 1\nend\n",
+    )
     git_run(root, "add", "-A")
     git_run(root, "commit", "-q", "-m", "base")
     commit = strip(git_run(root, "rev-parse", "HEAD"))
@@ -343,14 +479,26 @@ end
     @test read_map(joinpath(root, "map.toml")).suites == "test"
 
     @test names_in(selected_after(root, "src/P.jl", "x + 1", "x + 2")) == ["a/test_f.jl"]
-    @test names_in(selected_after(root, "src/P.jl", "return 2x", "return 3x")) == ["test_g.jl"]
+    @test names_in(selected_after(root, "src/P.jl", "return 2x", "return 3x")) ==
+        ["test_g.jl"]
 
     edited = selected_after(root, "test/a/test_f.jl", "P.f(1) == 2", "P.f(2) == 3")
     @test names_in(edited) == ["a/test_f.jl"]
     @test any(occursin("edited suite", last(pair)) for pair in edited.reasons)
-    @test isempty(names_in(selected_after(root, "test/a/test_f.jl", "using Test\n", "using Test # note\n")))
+    @test isempty(names_in(selected_after(
+        root,
+        "test/a/test_f.jl",
+        "using Test\n",
+        "using Test # note\n",
+    )))
 
-    @test names_in(selected_after(root, "test/support/helper.jl", "helper() = 1", "helper() = 2")) == ["test_g.jl"]
+    @test names_in(selected_after(
+        root,
+        "test/support/helper.jl",
+        "helper() = 1",
+        "helper() = 2",
+    )) ==
+        ["test_g.jl"]
 
     write_file(root, "test/test_new.jl", "@testset \"new\" begin\nend\n")
     write_file(root, "test/not_a_suite.jl", "x = 1\n")
@@ -360,14 +508,26 @@ end
     rm(joinpath(root, "test/test_new.jl"))
     rm(joinpath(root, "test/not_a_suite.jl"))
 
-    runner = selected_after(root, "test/runtests.jl", "include(suite)", "include(joinpath(@__DIR__, suite))")
+    runner = selected_after(
+        root,
+        "test/runtests.jl",
+        "include(suite)",
+        "include(joinpath(@__DIR__, suite))",
+    )
     @test names_in(runner) == ["a/test_f.jl", "test_g.jl", "test_h.jl"]
     @test !isempty(runner.full)
 
     # A helper the suite runs only through an include, and a testset inside it, belong to the suite.
-    @test names_in(selected_after(root, "test/support/setup.jl", "setup() = 1", "setup() = 2")) == ["test_h.jl"]
+    @test names_in(selected_after(
+        root,
+        "test/support/setup.jl",
+        "setup() = 1",
+        "setup() = 2",
+    )) ==
+        ["test_h.jl"]
 
-    @test runner_arguments(true, ["a/test_f.jl", "test_g.jl"]) == ["a/test_f.jl", "test_g.jl"]
+    @test runner_arguments(true, ["a/test_f.jl", "test_g.jl"]) ==
+        ["a/test_f.jl", "test_g.jl"]
     @test runner_arguments(false, ["x"]) == [retest_pattern(["x"])]
 end
 
@@ -388,4 +548,22 @@ end
     @test path_option("./test/runtests.jl") == "test/runtests.jl"
     @test path_option(".") == "."
     @test path_option("pkg/../test") == "test"
+end
+
+"Run the unit scenarios' `phase` in a child process tracking coverage of `tree`."
+function unit_phase(tree::AbstractString, phase::AbstractString)::Bool
+    script = joinpath(@__DIR__, "units_scenarios.jl")
+    command = `$(Base.julia_cmd()) --startup-file=no --project=$(Base.active_project()) --code-coverage=@$tree $script $tree $phase`
+    return success(pipeline(command; stdout, stderr))
+end
+
+@testset "units reuse results while the code they ran is unchanged" begin
+    tree = mktempdir()
+    mkpath(joinpath(tree, "src"))
+    @test unit_phase(tree, "coverage")
+    @test unit_phase(tree, "reuse")
+    uncovered = `$(Base.julia_cmd()) --startup-file=no --code-coverage=none --project=$(Base.active_project()) -e 'using Fallout; unit_cache()'`
+    message = IOBuffer()
+    @test !success(pipeline(uncovered; stderr = message))
+    @test occursin("--code-coverage=@DIR", String(take!(message)))
 end
