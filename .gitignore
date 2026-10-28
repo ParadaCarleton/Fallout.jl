@@ -1,1 +1,4 @@
 Manifest.toml
+*.jls
+.fallout_cache.jls
+
