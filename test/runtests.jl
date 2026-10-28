@@ -562,5 +562,8 @@ end
     mkpath(joinpath(tree, "src"))
     @test unit_phase(tree, "coverage")
     @test unit_phase(tree, "reuse")
-    @test_throws "--code-coverage=@DIR" Fallout.unit_cache()
+    uncovered = `$(Base.julia_cmd()) --startup-file=no --code-coverage=none --project=$(Base.active_project()) -e 'using Fallout; unit_cache()'`
+    message = IOBuffer()
+    @test !success(pipeline(uncovered; stderr = message))
+    @test occursin("--code-coverage=@DIR", String(take!(message)))
 end
