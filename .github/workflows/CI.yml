@@ -50,7 +50,9 @@ jobs:
           version: '1'
       - uses: julia-actions/cache@v2
       - run: julia --project=@corset -e 'using Pkg; Pkg.add(url = "https://github.com/ParadaCarleton/Corset.jl")'
-      - run: julia --project=@corset -e 'using Corset; exit(Corset.main(ARGS))' -- check . --no-load --deny-warnings
+      # Corset relaunches in this project and loads Fallout from it.
+      - run: julia --project=. -e 'using Pkg; Pkg.instantiate()'
+      - run: julia --project=@corset -e 'using Corset; exit(Corset.main(ARGS))' -- check . --deny-warnings
   format:
     runs-on: ubuntu-latest
     steps:

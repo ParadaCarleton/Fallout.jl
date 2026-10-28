@@ -247,7 +247,7 @@ function unit_cache(;
 end
 
 "Each method Julia has from a file under `root`, mapped to the item of `items` it starts in."
-function method_owners(root::AbstractString, items::AbstractVector{Digested})::Dict{
+function method_owners(root::AbstractString, items::AbstractVector{Digested})::Dict{ # lint: abstract-local  method reflection is untyped
         Method,
         Digested,
     }
@@ -312,19 +312,24 @@ function compiled_closure(
 end
 
 """
-The items whose methods the compiled code of `ran` reaches. Methods defined after the cache
-was made are looked up again when one of the items that ran has none.
+The owners of the methods of `cache`'s items, looked up again when a function item of `ran`
+has none, since its methods were defined after the cache was made.
 """
-function compiled_items(cache::UnitCache, ran::AbstractVector{Digested})::Vector{Digested}
-    started = Set((entry.path, entry.item.first) for entry in ran)
-    owned = Set((entry.path, entry.item.first) for entry in values(cache.owners))
-    owners = cache.owners
+function current_owners(cache::UnitCache, ran::AbstractVector{Digested})::typeof(cache.owners)
+    owned = Set{Tuple{String, Int}}((entry.path, entry.item.first) for entry in values(cache.owners))
     if any(
             entry.item.kind == :function && !((entry.path, entry.item.first) in owned)
                 for entry in ran
         )
-        owners = method_owners(cache.root, cache.items)
+        return method_owners(cache.root, cache.items)
     end
+    return cache.owners
+end
+
+"The items whose methods the compiled code of `ran` reaches."
+function compiled_items(cache::UnitCache, ran::AbstractVector{Digested})::Vector{Digested}
+    started = Set{Tuple{String, Int}}((entry.path, entry.item.first) for entry in ran)
+    owners = current_owners(cache, ran)
     roots = Set{Core.MethodInstance}(
         instance
             for (method, entry) in owners
@@ -471,7 +476,7 @@ function check_compute(compute::Any, cache::UnitCache, config::Any)::Nothing
             ")",
         )
     end
-    method = which(compute, (typeof(config),))
+    method::Method = which(compute, (typeof(config),))
     if cache.track == :coverage && isempty(relative_path(cache.root, String(method.file)))
         error(
             "a unit's function is defined in ",
@@ -541,7 +546,7 @@ function record_toml(record::UnitRecord)::Vector{UInt8}
 end
 
 "The record stored at `path`, or `nothing` with a warning when it does not match its name."
-function stored_record(path::AbstractString)::Union{Nothing, UnitRecord}
+function stored_record(path::AbstractString)::Union{Nothing, UnitRecord} # lint: abstract-local  a TOML document is untyped
     bytes = read(path)
     if !named_by(bytes, path)
         @warn "Fallout unit record is damaged; ignoring it" path
@@ -607,6 +612,7 @@ function run_compute(compute::Any, cache::UnitCache, config::Any)::Tuple{
         timed = @timed compute(config)
         return (timed.value, unit_record(cache, cache.items), timed.time)
     end
+    # lint: hidden-input-begin  coverage counters are process-wide, so their guard is too
     if islocked(COMPUTING)
         error(
             "units compute one at a time under coverage: run nested or threaded units in separate processes",
@@ -619,6 +625,7 @@ function run_compute(compute::Any, cache::UnitCache, config::Any)::Tuple{
     finally
         unlock(COMPUTING)
     end
+    # lint: hidden-input-end
 end
 
 """
@@ -629,7 +636,7 @@ and environment stored one and the code that run executed is unchanged; otherwis
 computed and stored. `compute` is a named function that captures nothing, so `config`
 holds every input that matters.
 """
-function unit(compute::Any, cache::UnitCache, config::Any)
+function unit(compute::Any, cache::UnitCache, config::Any) # lint: abstract-local  a stored result has the type `compute` returns
     name = unit_name(compute)
     check_compute(compute, cache, config)
     place = joinpath(cache.dir, unit_key(cache, name, compute, config))
