@@ -180,6 +180,23 @@ names_in(selection::Fallout.Selection)::Vector{String} = sort(unique(
     @test !isempty(full.full)
 
     @test_throws "cannot parse" selected_after(root, "src/P.jl", "x + 1", "x + )")
+
+    # A line break between tokens can change the code: `return\n2x` returns nothing.
+    @test names_in(selected_after(root, "src/P.jl", "return 2x", "return\n2x")) ==
+        ["runs g"]
+    @test isempty(names_in(selected_after(
+        root,
+        "src/P.jl",
+        "    return 2x",
+        "\n    return 2x",
+    )))
+    operator = selected_after(
+        root,
+        "src/P.jl",
+        "unused(x) = x",
+        "unused(x) = x\nBase.:(==)(a::S, b::S) = true",
+    )
+    @test names_in(operator) == ["helper user", "runs f", "runs g", "uses S"]
 end
 
 @testset "an import changes the names it stops importing, not the ones it starts importing" begin

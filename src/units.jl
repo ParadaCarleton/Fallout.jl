@@ -12,19 +12,22 @@ end
 """
 The code a unit's result depends on: for each file, the digests of the items it ran, and
 for each name those items mention, the digest of that name's definitions (`""` when none).
+`result` names the stored result file by its digest.
 """
 struct UnitRecord
     items::Dict{String, Vector{String}}
     names::Dict{String, String}
+    result::String
 end
 
 """
     UnitCache
 
 Where units store results (`dir`) and the tree whose code they depend on (`root`), parsed
-when the cache was made. `track` is `:coverage` (a unit depends on the code it ran) or
-`:sources` (on every file under `root`). `environment` digests Julia's version, the active
-project, its manifest and its preferences. `refresh` recomputes every unit.
+when the cache was made. `track` is `:coverage` (a unit depends on the code it ran or
+compiled) or `:sources` (on every file under `root`). `environment` digests Julia's version,
+the projects, manifests and preferences. `refresh` recomputes every unit. `owners` maps
+each method defined under `root` to the item that defines it.
 """
 struct UnitCache
     dir::String
@@ -35,6 +38,7 @@ struct UnitCache
     items::Vector{Digested}
     names::Dict{String, String}
     mentions::Dict{String, Set{String}}
+    owners::Dict{Method, Digested}
 end
 
 "One line of an LCOV tracefile: its file relative to the root, its number and its count."
@@ -51,9 +55,6 @@ function sha1_text(parts::AbstractVector{<:AbstractString})::String
     return bytes2hex(SHA.sha1(join(parts, '\0')))
 end
 
-"The digest of an item's code tokens: blanks and comments do not count, and `text` holds no docstring."
-item_digest(item::Item)::String = sha1_text(code_tokens([item.text]))
-
 "The text of `path`, or empty when there is no such file."
 function file_text(path::Union{Nothing, AbstractString})::String
     if isnothing(path) || !isfile(path)
@@ -62,12 +63,20 @@ function file_text(path::Union{Nothing, AbstractString})::String
     return read(path, String)
 end
 
-"The digest of Julia's version and `project`'s `Project.toml`, manifest and preferences."
+"""
+The digest of Julia's version and the project, manifest and preferences of `project` and
+of every environment on the load path.
+"""
 function environment_digest(project::AbstractString)::String
     files = [
-        project,
-        Base.project_file_manifest_path(project),
-        joinpath(dirname(project), "LocalPreferences.toml"),
+        file
+        for environment in filter(isfile, unique(vcat(project, Base.load_path())))
+        for file in (
+            environment,
+            Base.project_file_manifest_path(environment),
+            joinpath(dirname(environment), "LocalPreferences.toml"),
+            joinpath(dirname(environment), "JuliaLocalPreferences.toml"),
+        )
     ]
     return sha1_text(vcat(string(VERSION), file_text.(files)))
 end
@@ -77,15 +86,58 @@ function hidden(path::AbstractString)::Bool
     return any(startswith(part, ".") for part in splitpath(dirname(path)))
 end
 
-"The digest of a name's definitions: the code of its bindings and the headers of its methods."
+"""
+The digest of a name's definitions: the load-time items that bind or mention it without
+binding anything (`using .B: f`, `K[1] = 2`), and the headers of its methods. A name that
+load-time code can call (in `loaded`) also digests its methods' bodies.
+"""
 function name_digest(
     name::AbstractString,
+    loaders::AbstractVector{Digested},
+    functions::AbstractVector{Digested},
+    loaded::Set{String},
+)::String
+    codes = sort([
+        entry.digest
+        for entry in loaders
+        if name in entry.item.keys ||
+            (isempty(entry.item.keys) && name in entry.item.mentions)
+    ])
+    methods = [entry for entry in functions if entry.item.name == name]
+    headers = sort([string(entry.item.scope, ".", entry.item.header) for entry in methods])
+    bodies = sort([entry.digest for entry in methods if name in loaded])
+    return sha1_text(vcat(codes, "|", headers, "|", bodies))
+end
+
+"Every name in `start` and the names reached from it through `mentions`."
+function name_closure(mentions::AbstractDict, start::Set{String})::Set{String}
+    grown = union(start, (get(mentions, name, Set{String}()) for name in start)...)
+    if grown == start
+        return start
+    end
+    return name_closure(mentions, grown)
+end
+
+"""
+The names load-time code can reach: those bindings mention, and those the methods of a
+reached name mention.
+"""
+function loaded_names(
     bindings::AbstractVector{Digested},
     functions::AbstractVector{Digested},
-)::String
-    codes = sort([entry.digest for entry in bindings if name in entry.item.keys])
-    headers = sort([entry.item.header for entry in functions if entry.item.name == name])
-    return sha1_text(vcat(codes, "|", headers))
+)::Set{String}
+    names = Set(entry.item.name for entry in functions)
+    calls = Dict(
+        name => union(
+            Set{String}(),
+            (entry.item.mentions for entry in functions if entry.item.name == name)...
+        )
+        for name in names
+    )
+    return name_closure(
+        calls,
+        union(Set{String}(), (entry.item.mentions for entry in bindings)...),
+    )
 end
 
 "The directory `--code-coverage=@DIR` tracks; an error when Julia runs without it."
@@ -128,30 +180,46 @@ function unit_cache(;
     if !(track in (:coverage, :sources))
         error("`track` is `:coverage` or `:sources`, not `:", track, "`")
     end
-    if track == :coverage
-        coverage_root()
-    end
     if !isdir(root)
         error("unit cache root `", root, "` is not a directory")
     end
     whole = realpath(root)
+    if track == :coverage
+        tracked = realpath(coverage_root())
+        if whole != tracked && isempty(relative_path(tracked, whole))
+            error(
+                "unit cache root `",
+                whole,
+                "` lies outside the directory coverage tracks, `",
+                tracked,
+                "`",
+            )
+        end
+    end
     paths = [path for path in jl_files(whole, ".") if !hidden(path)]
     items = [
-        Digested(path, item, item_digest(item))
+        Digested(path, item, code_digest(item))
         for path in paths
         for item in source_items(read(joinpath(whole, path), String), path)
     ]
     bindings = [entry for entry in items if entry.item.kind == :binding]
+    loaders = vcat(bindings, [entry for entry in items if import_item(entry.item)])
     functions = [entry for entry in items if entry.item.kind == :function]
+    loaded = loaded_names(bindings, functions)
     defined = union(
-        Set(key for entry in bindings for key in entry.item.keys),
+        Set(name for entry in loaders for name in entry.item.mentions),
         Set(entry.item.name for entry in functions)
     )
-    names = Dict(name => name_digest(name, bindings, functions) for name in defined)
+    names = Dict(name => name_digest(name, loaders, functions, loaded) for name in defined)
     mentions = Dict(
         name => union(
             Set{String}(),
-            (entry.item.mentions for entry in bindings if name in entry.item.keys)...
+            (entry.item.mentions for entry in bindings if name in entry.item.keys)...,
+            (
+                entry.item.mentions
+                for entry in functions
+                if entry.item.name == name && name in loaded
+            )...
         )
         for name in defined
     )
@@ -164,16 +232,100 @@ function unit_cache(;
         items,
         names,
         mentions,
+        method_owners(whole, items),
     )
 end
 
-"Every name reachable from `start` through the names that bindings mention."
-function name_closure(cache::UnitCache, start::Set{String})::Set{String}
-    grown = union(start, (get(cache.mentions, name, Set{String}()) for name in start)...)
-    if grown == start
-        return start
+"Each method Julia has from a file under `root`, mapped to the item of `items` it starts in."
+function method_owners(root::AbstractString, items::AbstractVector{Digested})::Dict{
+    Method,
+    Digested,
+}
+    matches = Base._methods_by_ftype(Tuple, -1, Base.get_world_counter())
+    located = [
+        (match.method, relative_path(root, String(match.method.file)))
+        for match in matches
+        if match.method.file != :none
+    ]
+    return Dict(
+        method => entry
+        for (method, file) in located
+        if !isempty(file)
+        for entry in items
+        if entry.path == file && entry.item.first <= method.line <= entry.item.last
+    )
+end
+
+"The method instances an edge of compiled code names."
+edge_targets(edge::Core.CodeInstance)::Vector{Core.MethodInstance} = edge_targets(edge.def)
+edge_targets(edge::Core.ABIOverride)::Vector{Core.MethodInstance} = edge_targets(edge.def)
+edge_targets(edge::Core.MethodInstance)::Vector{Core.MethodInstance} = [edge]
+edge_targets(edge::Any)::Vector{Core.MethodInstance} = Core.MethodInstance[]
+
+"`code` and the compiled versions chained after it."
+function code_chain(code::Core.CodeInstance)::Vector{Core.CodeInstance}
+    if isdefined(code, :next)
+        return vcat(code, code_chain(code.next))
     end
-    return name_closure(cache, grown)
+    return [code]
+end
+
+"""
+The method instances the compiled versions of `instance` call or folded into constants.
+Julia keeps these edges to invalidate code, so they hold calls that leave no coverage.
+"""
+function compiled_callees(instance::Core.MethodInstance)::Vector{Core.MethodInstance}
+    if !isdefined(instance, :cache)
+        return Core.MethodInstance[]
+    end
+    return [
+        target
+        for code in code_chain(instance.cache)
+        if isdefined(code, :edges)
+        for edge in code.edges
+        for target in edge_targets(edge)
+    ]
+end
+
+"`seen`, `frontier` and every method instance reachable from `frontier` through compiled edges."
+function compiled_closure(
+    frontier::Set{Core.MethodInstance},
+    seen::Set{Core.MethodInstance},
+)::Set{Core.MethodInstance}
+    if isempty(frontier)
+        return seen
+    end
+    grown = union(seen, frontier)
+    callees = Set(callee for instance in frontier for callee in compiled_callees(instance))
+    return compiled_closure(setdiff(callees, grown), grown)
+end
+
+"""
+The items whose methods the compiled code of `ran` reaches. Methods defined after the cache
+was made are looked up again when one of the items that ran has none.
+"""
+function compiled_items(cache::UnitCache, ran::AbstractVector{Digested})::Vector{Digested}
+    started = Set((entry.path, entry.item.first) for entry in ran)
+    owned = Set((entry.path, entry.item.first) for entry in values(cache.owners))
+    owners = cache.owners
+    if any(
+            entry.item.kind == :function && !((entry.path, entry.item.first) in owned)
+            for entry in ran
+        )
+        owners = method_owners(cache.root, cache.items)
+    end
+    roots = Set(
+        instance
+        for (method, entry) in owners
+        if (entry.path, entry.item.first) in started
+        for instance in Base.specializations(method)
+    )
+    reached = compiled_closure(roots, Set{Core.MethodInstance}())
+    return [
+        owners[instance.def]
+        for instance in reached
+        if instance.def isa Method && haskey(owners, instance.def)
+    ]
 end
 
 "A record of `ran`, the items a unit executed."
@@ -190,19 +342,25 @@ function unit_record(cache::UnitCache, ran::AbstractVector{Digested})::UnitRecor
     )
     return UnitRecord(
         items,
-        Dict(name => get(cache.names, name, "") for name in name_closure(cache, start))
+        Dict(
+            name => get(cache.names, name, "")
+            for name in name_closure(cache.mentions, start)
+        ),
+        "",
     )
 end
 
-"Whether the code `record` names is unchanged in `cache`'s tree."
+"""
+Whether the code `record` names is unchanged in `cache`'s tree. Under `:sources` the tree
+holds exactly the recorded items, so an added item breaks the record too.
+"""
 function holds(cache::UnitCache, record::UnitRecord)::Bool
     present = Set((entry.path, entry.digest) for entry in cache.items)
-    items_hold = all(
-        (path, digest) in present
-        for (path, digests) in record.items
-        for digest in digests
-    )
-    return items_hold &&
+    recorded = Set((path, digest) for (path, digests) in record.items for digest in digests)
+    if cache.track == :sources
+        return recorded == present
+    end
+    return issubset(recorded, present) &&
         all(get(cache.names, name, "") == digest for (name, digest) in record.names)
 end
 
@@ -241,7 +399,7 @@ the cache did not parse records the digest `unparsed`, which never holds.
 """
 function ran_record(cache::UnitCache, before::AbstractDict, after::AbstractDict)::UnitRecord
     lines = [key for (key, count) in after if count > get(before, key, 0)]
-    ran = [
+    covered = [
         entry
         for entry in cache.items
         if any(
@@ -249,7 +407,7 @@ function ran_record(cache::UnitCache, before::AbstractDict, after::AbstractDict)
             for (path, line) in lines
         )
     ]
-    record = unit_record(cache, ran)
+    record = unit_record(cache, vcat(covered, compiled_items(cache, covered)))
     unparsed = setdiff(Set(first.(lines)), Set(entry.path for entry in cache.items))
     if isempty(unparsed)
         return record
@@ -260,6 +418,7 @@ function ran_record(cache::UnitCache, before::AbstractDict, after::AbstractDict)
     return UnitRecord(
         merge(record.items, Dict(path => ["unparsed"] for path in unparsed)),
         record.names,
+        "",
     )
 end
 
@@ -302,13 +461,18 @@ function unit_name(compute::Any)::String
     return string(owner, ".", name)
 end
 
-"The key of a unit: its function's name, its config's stable hash, the environment and the tracking mode."
-function unit_key(cache::UnitCache, name::AbstractString, config::Any)::String
+"""
+The key of a unit: its function's name and type, its config's type and stable hash (which
+skips type parameters), the environment and the tracking mode.
+"""
+function unit_key(cache::UnitCache, name::AbstractString, compute::Any, config::Any)::String
     configured = bytes2hex(stable_hash(config; version = 4))
     return first(
         sha1_text([
-            "fallout-unit-1",
+            "fallout-unit-2",
             name,
+            string(typeof(compute)),
+            string(typeof(config)),
             configured,
             cache.environment,
             string(cache.track),
@@ -317,33 +481,44 @@ function unit_key(cache::UnitCache, name::AbstractString, config::Any)::String
     )
 end
 
-function record_toml(record::UnitRecord)::String
+"The name of a stored file: the first 24 hex digits of its contents' SHA-1."
+stored_name(bytes::AbstractVector{UInt8})::String = first(bytes2hex(SHA.sha1(bytes)), 24)
+
+"Whether `bytes` are the contents the name of `path` digests."
+named_by(bytes::AbstractVector{UInt8}, path::AbstractString)::Bool = stored_name(bytes) ==
+    first(splitext(basename(path)))
+
+function record_toml(record::UnitRecord)::Vector{UInt8}
     buffer = IOBuffer()
     TOML.print(
         buffer,
-        Dict("items" => record.items, "names" => record.names);
+        Dict("items" => record.items, "names" => record.names, "result" => record.result);
         sorted = true,
     )
-    return String(take!(buffer))
+    return take!(buffer)
 end
 
-function read_record(path::AbstractString)::UnitRecord
-    table = TOML.parsefile(path)
+"The record stored at `path`, or `nothing` with a warning when it does not match its name."
+function stored_record(path::AbstractString)::Union{Nothing, UnitRecord}
+    bytes = read(path)
+    if !named_by(bytes, path)
+        @warn "Fallout unit record is damaged; ignoring it" path
+        return nothing
+    end
+    table = TOML.parse(String(bytes))
     items = Dict{String, Vector{String}}(
         file => String.(digests)
         for (file, digests) in table["items"]
     )
-    return UnitRecord(items, Dict{String, String}(table["names"]))
+    return UnitRecord(items, Dict{String, String}(table["names"]), table["result"])
 end
 
-"Write `contents` to `path` through a temporary file, so readers never see half of it."
-function write_whole(path::AbstractString, contents::Any)::Nothing
-    partial = string(path, ".", getpid(), ".partial")
-    if contents isa AbstractString
-        write(partial, contents)
-    else
-        serialize(partial, contents)
-    end
+"Write `bytes` to `path` through a temporary file beside it, so readers never see half of it."
+function write_whole(path::AbstractString, bytes::AbstractVector{UInt8})::Nothing
+    partial, io = mktemp(dirname(path))
+    write(io, bytes)
+    close(io)
+    chmod(partial, 0o644)
     mv(partial, path; force = true)
     return nothing
 end
@@ -353,13 +528,31 @@ function holding_results(cache::UnitCache, place::AbstractString)::Vector{String
     if cache.refresh || !isdir(place)
         return String[]
     end
-    records = [joinpath(place, file) for file in readdir(place) if endswith(file, ".toml")]
-    holding = [
-        chopsuffix(record, ".toml") * ".jls"
-        for record in records
-        if holds(cache, read_record(record))
+    records = [
+        stored_record(joinpath(place, file))
+        for file in readdir(place)
+        if endswith(file, ".toml")
     ]
+    holding = unique(
+        joinpath(place, record.result * ".jls")
+        for record in records
+        if !isnothing(record) && holds(cache, record)
+    )
     return sort(holding; by = mtime, rev = true)
+end
+
+"The first of `paths` whose contents match its name, deserialized; `nothing` when none does."
+function stored_result(paths::AbstractVector{<:AbstractString})::Union{Nothing, Some}
+    for path in paths
+        if isfile(path)
+            bytes = read(path)
+            if named_by(bytes, path)
+                return Some(deserialize(IOBuffer(bytes)))
+            end
+        end
+        @warn "Fallout unit result is missing or damaged; trying the next one" path
+    end
+    return nothing
 end
 
 "Run `compute(config)` and record the code it depends on."
@@ -402,18 +595,20 @@ holds every input that matters.
 function unit(compute::Any, cache::UnitCache, config::Any)
     name = unit_name(compute)
     check_compute(compute, cache, config)
-    place = joinpath(cache.dir, unit_key(cache, name, config))
-    holding = holding_results(cache, place)
-    if !isempty(holding)
+    place = joinpath(cache.dir, unit_key(cache, name, compute, config))
+    stored = stored_result(holding_results(cache, place))
+    if !isnothing(stored)
         @debug "Fallout unit reused" name
-        return deserialize(first(holding))
+        return something(stored)
     end
     result, record, seconds = run_compute(compute, cache, config)
-    text = record_toml(record)
-    stem = joinpath(place, first(sha1_text([text]), 24))
+    buffer = IOBuffer()
+    serialize(buffer, result)
+    bytes = take!(buffer)
+    text = record_toml(UnitRecord(record.items, record.names, stored_name(bytes)))
     mkpath(place)
-    write_whole(stem * ".jls", result)
-    write_whole(stem * ".toml", text)
+    write_whole(joinpath(place, stored_name(bytes) * ".jls"), bytes)
+    write_whole(joinpath(place, stored_name(text) * ".toml"), text)
     @info "Fallout unit computed" name seconds
     return result
 end

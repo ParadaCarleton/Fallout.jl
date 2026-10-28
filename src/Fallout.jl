@@ -36,8 +36,8 @@ export main, unit, unit_cache, UnitCache
 One top-level item of a file. `kind` is `:function`, `:binding` (struct, abstract or
 primitive type, const, global, assignment, macro), `:testset`, `:include` or `:other`.
 `keys` are the names the item defines (empty for `:other`), `mentions` every identifier
-inside it, `header` a function's signature without whitespace, and `doc_first:doc_last`
-the docstring's lines (`0:-1` for none).
+inside it, `header` a function's signature without whitespace, `doc_first:doc_last`
+the docstring's lines (`0:-1` for none), and `scope` the modules it lies in (`A.B`).
 """
 struct Item
     kind::Symbol
@@ -50,6 +50,7 @@ struct Item
     mentions::Set{String}
     includes::Vector{String}
     header::String
+    scope::String
     text::String
 end
 
@@ -139,7 +140,11 @@ function callee_name(node::JS.SyntaxNode)::String
         return "(callable)"
     end
     if kind == K"."
-        return String(last(split(JS.sourcetext(node), '.')))
+        # `Base.:(==)` and `Base.:+` define `==` and `+`, the names callers mention.
+        return String(lstrip(
+            chopsuffix(chopprefix(last(split(JS.sourcetext(node), '.')), ":("), ")"),
+            ':',
+        ))
     end
     return String(JS.sourcetext(node))
 end
@@ -244,6 +249,7 @@ function build_item(
     whole::JS.SyntaxNode,
     description::Tuple{Symbol, String, Vector{String}, String},
     doc::UnitRange{Int},
+    scope::AbstractString,
 )::Item
     kind, name, keys, header = description
     return Item(
@@ -257,33 +263,43 @@ function build_item(
         Set(identifier_texts(whole)),
         include_paths(whole),
         header,
+        scope,
         String(JS.sourcetext(whole)),
     )
 end
 
-function node_items(node::JS.SyntaxNode, doc::UnitRange{Int})::Vector{Item}
+function node_items(
+    node::JS.SyntaxNode,
+    doc::UnitRange{Int},
+    scope::AbstractString,
+)::Vector{Item}
     kind = JS.kind(node)
     if kind == K"module"
-        block = last(JS.children(node))
+        parts = JS.children(node)
+        inner = join(filter(!isempty, [scope, String(JS.sourcetext(first(parts)))]), '.')
         return reduce(
             vcat,
-            (node_items(part, 0:-1) for part in JS.children(block));
+            (node_items(part, 0:-1, inner) for part in JS.children(last(parts)));
             init = Item[],
         )
     end
     if kind == K"doc"
         parts = JS.children(node)
-        return node_items(last(parts), first_line(first(parts)):last_line(first(parts)))
+        return node_items(
+            last(parts),
+            first_line(first(parts)):last_line(first(parts)),
+            scope,
+        )
     end
     found = testset_nodes(node)
     if !isempty(found)
         name = testset_name(first(found))
-        return [build_item(node, (:testset, name, [name], ""), doc)]
+        return [build_item(node, (:testset, name, [name], ""), doc, scope)]
     end
     if kind == K"macrocall"
-        return [build_item(node, describe_core(unwrap_macro(node)), doc)]
+        return [build_item(node, describe_core(unwrap_macro(node)), doc, scope)]
     end
-    return [build_item(node, describe_core(node), doc)]
+    return [build_item(node, describe_core(node), doc, scope)]
 end
 
 """
@@ -309,7 +325,7 @@ function source_items(text::AbstractString, label::AbstractString)::Vector{Item}
     if isnothing(parts)
         return Item[]
     end
-    return reduce(vcat, (node_items(part, 0:-1) for part in parts); init = Item[])
+    return reduce(vcat, (node_items(part, 0:-1, "") for part in parts); init = Item[])
 end
 
 # ---------------------------------------------------------------------------------------
@@ -459,6 +475,7 @@ function suite_file_items(
         -1,
         reduce(union, (item.mentions for item in vcat(items, inner)); init = Set{String}()),
         includes,
+        "",
         "",
         text,
     )
@@ -860,9 +877,29 @@ function code_tokens(lines::AbstractVector{<:AbstractString})::Vector{String}
     ]
 end
 
+"`expression` without line numbers, which move when code above it changes."
+function unlined(expression::Expr)::Expr
+    return Expr(
+        expression.head,
+        (unlined(part) for part in expression.args if !(part isa LineNumberNode))...
+    )
+end
+function unlined(part::T)::T where {T}
+    return part
+end
+
+"""
+The digest of an item's code: its modules and its parsed expression. Comments, docstrings
+and blanks do not count; a blank that changes the code (`[1 -x]`, `[1 - x]`) does.
+"""
+function code_digest(item::Item)::String
+    expression = unlined(JS.parseall(Expr, item.text))
+    return bytes2hex(SHA.sha1(string(item.scope, '\0', expression)))
+end
+
 """
 Whether a hunk changes nothing but blanks, comments and docstrings: the lines outside
-docstrings carry the same tokens before and after.
+docstrings carry the same tokens, and the items around the hunk parse the same.
 """
 function ignorable(
     hunk::Hunk,
@@ -879,23 +916,28 @@ function ignorable(
         for (offset, text) in enumerate(hunk.added)
         if !ignorable_line(text, hunk.new_first + offset - 1, new_items)
     ]
-    return code_tokens(removed) == code_tokens(added)
+    return code_tokens(removed) == code_tokens(added) &&
+        code_digest.(items_around(old_items, hunk.old_first, hunk.old_count)) ==
+            code_digest.(items_around(new_items, hunk.new_first, hunk.new_count))
 end
 
 function overlapping(items::AbstractVector{Item}, low::Integer, high::Integer)::Vector{Item}
     return [item for item in items if item.first <= high && item.last >= low]
 end
 
+"Items `count` lines from `start` touch; no lines touch the item they land inside."
+function items_around(items::AbstractVector{Item}, start::Integer, count::Integer)::Vector{
+    Item,
+}
+    if count > 0
+        return overlapping(items, start, start + count - 1)
+    end
+    return [item for item in items if item.first <= start && start < item.last]
+end
+
 "Old items a hunk touches; an insertion touches the item it lands inside."
 function items_hit_old(items::AbstractVector{Item}, hunk::Hunk)::Vector{Item}
-    if hunk.old_count > 0
-        return overlapping(items, hunk.old_first, hunk.old_first + hunk.old_count - 1)
-    end
-    return [
-        item
-        for item in items
-        if item.first <= hunk.old_first && hunk.old_first < item.last
-    ]
+    return items_around(items, hunk.old_first, hunk.old_count)
 end
 
 function items_hit_new(items::AbstractVector{Item}, hunk::Hunk)::Vector{Item}

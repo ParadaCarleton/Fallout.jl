@@ -52,7 +52,8 @@ sources. The second form tracks `.` and writes one tracefile instead.
 2. **Pass every input through `config`.** `unit(compute, cache, config)` calls
    `compute(config)`. `compute` must capture nothing: a closure, or a callable struct
    with fields, is an error. Put seeds, sizes, tolerances and options in `config`. Fallout
-   hashes `config` with StableHashTraits, so use plain values: numbers, strings, symbols,
+   hashes `config` with StableHashTraits and adds its type, so `Solver{1}(3)` and
+   `Solver{2}(3)` are different configs. Use plain values: numbers, strings, symbols,
    tuples, named tuples, arrays, dictionaries and structs of these.
 
 3. **Seed from `config`.** Draw random numbers from `Random.Xoshiro(config.seed)`, never
@@ -64,7 +65,8 @@ sources. The second form tracks `.` and writes one tracefile instead.
    finished before the interruption are reused on the next run.
 
 5. **Make `compute` a named top-level function.** A unit is identified by its function's
-   module-qualified name and its `config`. An anonymous function or `do` block is an
+   module-qualified name and type, and its `config`. A callable struct without fields
+   counts with its type parameters (`Calc{1}()`). An anonymous function or `do` block is an
    error, because its generated name shifts when unrelated code above it changes. A
    `compute` defined outside the tracked directory is also an error. Fallout tracks code
    by top-level item (a function, a struct, a `const`, a whole `@testset`), so keep
@@ -86,11 +88,24 @@ sources. The second form tracks `.` and writes one tracefile instead.
    across processes (`Distributed.pmap`, several machines) instead. Code inside a unit may
    use threads freely. Do not run other threaded work beside a computing unit.
 
+## Assumptions
+
+Fallout assumes three things about the code a unit runs. A linter can check each one.
+
+| Assumption | Check it with |
+| --- | --- |
+| Functions read no mutable global (a `const` vector, a `Ref`, a non-`const` global) | Corset's `hidden_inputs` |
+| Code imports the names it uses explicitly (`using .Models: fit`, never `using .Models`) | ExplicitImports' `check_no_implicit_imports` |
+| No method replaces another with the same signature | Julia refuses it while a package precompiles |
+
+A unit that breaks one can return a stale result: a switch from `using .A` to `using .B`
+that changes which `f` the unit calls goes unseen.
+
 ## Tracking modes
 
 | `track` | A unit depends on | Needs | Use when |
 | --- | --- | --- | --- |
-| `:coverage` (default) | The items it executed, and the definitions they mention | `--code-coverage=@ROOT` | Iterating on code a long test runs |
+| `:coverage` (default) | The items it executed or compiled a call to, and the definitions they mention | `--code-coverage=@ROOT` | Iterating on code a long test runs |
 | `:sources` | Every `.jl` file under `root` | Nothing | Coverage slows the computation too much, or units run on threads |
 
 Coverage instrumentation slows only code under the tracked directory, never your
@@ -99,30 +114,38 @@ speed; a `Dict`-heavy loop ran 35% slower; a tight loop over small inlined funct
 many times slower, because the counters block the optimizations that removed the loop.
 Measure your own units before choosing.
 
-Under `:sources`, any edit to code under `root` recomputes every unit. Blanks, comments
-and docstrings still do not count.
+Under `:sources`, any edit to code under `root` recomputes every unit, and so does added
+code. Blanks, comments and docstrings still do not count.
 
 ## What every unit depends on
 
-- Its function's module-qualified name, and its `config`.
-- Julia's version, and the active project's `Project.toml`, manifest and
-  `LocalPreferences.toml` (pass `project` to `unit_cache` to name another project).
-  Upgrading a dependency recomputes every unit.
-- Under `:coverage`, the code tokens of every top-level item it executed under the tracked
-  directory. Comments, blank lines and docstrings are not code tokens.
-- Under `:coverage`, for every name those items mention: the code of the `const`s,
-  globals, structs and macros of that name (followed through the names they mention), and
-  the signature headers of its methods. Adding a method to a function the unit calls
-  recomputes it.
+- Its function's module-qualified name and type, and its `config` and the config's type.
+- Julia's version, and the `Project.toml`, manifest, `LocalPreferences.toml` and
+  `JuliaLocalPreferences.toml` of the active project and of every environment on the load
+  path (pass `project` to `unit_cache` to name another project). Upgrading a dependency
+  recomputes every unit.
+- Under `:coverage`, the parsed code and enclosing modules of every top-level item under
+  the tracked directory that the unit executed, or whose methods the unit's compiled code
+  calls. The compiled calls include calls Julia folded into constants, which leave no
+  coverage, and calls on branches the run did not take. Comments, blank lines and
+  docstrings do not count; a blank that changes the code (`[1 -x]` against `[1 - x]`) does.
+- Under `:coverage`, for every name those items mention: the `const`s, globals, structs
+  and macros of that name (followed through the names they mention), the imports and
+  top-level statements that mention it (`using .B: f`, `K[1] = 2`), and the signature
+  headers of its methods. Adding a method to a function the unit calls, an operator
+  included, recomputes it. Code that runs while the package loads (`const K = helper()`)
+  depends on the bodies of the functions it calls, followed through what they call.
 
 ## Sharing a cache between machines
 
 `unit_cache(; dir)` names the directory the results go to. Point several machines at one
 shared directory, or copy it between them with `rsync`. A machine reuses a result only
 when its Julia version, project, manifest and preferences match the machine that stored
-it, so check out the same manifest everywhere. Results are written to a temporary file
-and then renamed, so a reader never sees half a result. Two machines that compute the
-same unit at once both store it; the second write replaces the first.
+it, so check out the same manifest everywhere. Each write goes to a temporary file of its
+own and is then renamed, so a reader never sees half a file. Every stored file is named
+by the digest of its contents. A result or record that does not match its name (a
+damaged copy, a full disk) is skipped with a warning, and the unit computes again. Two
+machines that compute the same unit at once both store it.
 
 ## Blind spots
 
