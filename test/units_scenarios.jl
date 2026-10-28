@@ -12,17 +12,17 @@ const EXPECTED = joinpath(TREE, "expected.jls")
 
 "The throwaway package's source, with each definition replaceable."
 function package_source(;
-    helper::AbstractString = "helper(x) = x + K",
-    constant::AbstractString = "const K = 3",
-    other::AbstractString = "other(x) = x",
-    extra::AbstractString = "",
-    doc::AbstractString = "Fit one replicate.",
-    loader::AbstractString = "loader() = 1",
-    from::AbstractString = "A",
-    a_g::AbstractString = "1",
-    b_g::AbstractString = "2",
-    matrix::AbstractString = "[1 2]",
-)::String
+        helper::AbstractString = "helper(x) = x + K",
+        constant::AbstractString = "const K = 3",
+        other::AbstractString = "other(x) = x",
+        extra::AbstractString = "",
+        doc::AbstractString = "Fit one replicate.",
+        loader::AbstractString = "loader() = 1",
+        from::AbstractString = "A",
+        a_g::AbstractString = "1",
+        b_g::AbstractString = "2",
+        matrix::AbstractString = "[1 2]",
+    )::String
     return """
     module P
     $constant
@@ -208,7 +208,7 @@ if PHASE == "coverage"
         @test computed(cache, 7)
         @test all(
             endswith(file, ".jls") || endswith(file, ".toml")
-            for file in readdir(place)
+                for file in readdir(place)
         )
         results = filter(endswith(".jls"), readdir(place; join = true))
         write.(results, "truncated")

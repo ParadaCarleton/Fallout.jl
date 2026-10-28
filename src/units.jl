@@ -2,6 +2,9 @@
 # Units: cached pieces of a long test, reused while the code they ran is unchanged
 # ---------------------------------------------------------------------------------------
 
+using Serialization: serialize, deserialize
+using StableHashTraits: stable_hash
+
 "An item of the tree a unit cache watches, with its file and the digest of its code."
 struct Digested
     path::String
@@ -70,13 +73,13 @@ of every environment on the load path.
 function environment_digest(project::AbstractString)::String
     files = [
         file
-        for environment in filter(isfile, unique(vcat(project, Base.load_path())))
-        for file in (
-            environment,
-            Base.project_file_manifest_path(environment),
-            joinpath(dirname(environment), "LocalPreferences.toml"),
-            joinpath(dirname(environment), "JuliaLocalPreferences.toml"),
-        )
+            for environment in filter(isfile, unique(vcat(project, Base.load_path())))
+            for file in (
+                environment,
+                Base.project_file_manifest_path(environment),
+                joinpath(dirname(environment), "LocalPreferences.toml"),
+                joinpath(dirname(environment), "JuliaLocalPreferences.toml"),
+            )
     ]
     return sha1_text(vcat(string(VERSION), file_text.(files)))
 end
@@ -92,17 +95,19 @@ binding anything (`using .B: f`, `K[1] = 2`), and the headers of its methods. A 
 load-time code can call (in `loaded`) also digests its methods' bodies.
 """
 function name_digest(
-    name::AbstractString,
-    loaders::AbstractVector{Digested},
-    functions::AbstractVector{Digested},
-    loaded::Set{String},
-)::String
-    codes = sort([
-        entry.digest
-        for entry in loaders
-        if name in entry.item.keys ||
-            (isempty(entry.item.keys) && name in entry.item.mentions)
-    ])
+        name::AbstractString,
+        loaders::AbstractVector{Digested},
+        functions::AbstractVector{Digested},
+        loaded::Set{String},
+    )::String
+    codes = sort(
+        [
+            entry.digest
+                for entry in loaders
+                if name in entry.item.keys ||
+                (isempty(entry.item.keys) && name in entry.item.mentions)
+        ]
+    )
     methods = [entry for entry in functions if entry.item.name == name]
     headers = sort([string(entry.item.scope, ".", entry.item.header) for entry in methods])
     bodies = sort([entry.digest for entry in methods if name in loaded])
@@ -123,16 +128,16 @@ The names load-time code can reach: those bindings mention, and those the method
 reached name mention.
 """
 function loaded_names(
-    bindings::AbstractVector{Digested},
-    functions::AbstractVector{Digested},
-)::Set{String}
+        bindings::AbstractVector{Digested},
+        functions::AbstractVector{Digested},
+    )::Set{String}
     names = Set(entry.item.name for entry in functions)
     calls = Dict(
         name => union(
             Set{String}(),
             (entry.item.mentions for entry in functions if entry.item.name == name)...
         )
-        for name in names
+            for name in names
     )
     return name_closure(
         calls,
@@ -171,12 +176,12 @@ it depends on every `.jl` file under `root` (default: the working directory). Ev
 also depends on Julia's version and `project`'s `Project.toml`, manifest and preferences.
 """
 function unit_cache(;
-    track::Symbol = :coverage,
-    root::AbstractString = default_root(track),
-    dir::AbstractString = joinpath(root, ".fallout", "units"),
-    project::AbstractString = Base.active_project(),
-    refresh::Bool = false,
-)::UnitCache
+        track::Symbol = :coverage,
+        root::AbstractString = default_root(track),
+        dir::AbstractString = joinpath(root, ".fallout", "units"),
+        project::AbstractString = Base.active_project(),
+        refresh::Bool = false,
+    )::UnitCache
     if !(track in (:coverage, :sources))
         error("`track` is `:coverage` or `:sources`, not `:", track, "`")
     end
@@ -199,8 +204,8 @@ function unit_cache(;
     paths = [path for path in jl_files(whole, ".") if !hidden(path)]
     items = [
         Digested(path, item, code_digest(item))
-        for path in paths
-        for item in source_items(read(joinpath(whole, path), String), path)
+            for path in paths
+            for item in source_items(read(joinpath(whole, path), String), path)
     ]
     bindings = [entry for entry in items if entry.item.kind == :binding]
     loaders = vcat(bindings, [entry for entry in items if import_item(entry.item)])
@@ -217,11 +222,11 @@ function unit_cache(;
             (entry.item.mentions for entry in bindings if name in entry.item.keys)...,
             (
                 entry.item.mentions
-                for entry in functions
-                if entry.item.name == name && name in loaded
+                    for entry in functions
+                    if entry.item.name == name && name in loaded
             )...
         )
-        for name in defined
+            for name in defined
     )
     return UnitCache(
         abspath(dir),
@@ -238,21 +243,21 @@ end
 
 "Each method Julia has from a file under `root`, mapped to the item of `items` it starts in."
 function method_owners(root::AbstractString, items::AbstractVector{Digested})::Dict{
-    Method,
-    Digested,
-}
+        Method,
+        Digested,
+    }
     matches = Base._methods_by_ftype(Tuple, -1, Base.get_world_counter())
     located = [
         (match.method, relative_path(root, String(match.method.file)))
-        for match in matches
-        if match.method.file != :none
+            for match in matches
+            if match.method.file != :none
     ]
     return Dict(
         method => entry
-        for (method, file) in located
-        if !isempty(file)
-        for entry in items
-        if entry.path == file && entry.item.first <= method.line <= entry.item.last
+            for (method, file) in located
+            if !isempty(file)
+            for entry in items
+            if entry.path == file && entry.item.first <= method.line <= entry.item.last
     )
 end
 
@@ -280,18 +285,18 @@ function compiled_callees(instance::Core.MethodInstance)::Vector{Core.MethodInst
     end
     return [
         target
-        for code in code_chain(instance.cache)
-        if isdefined(code, :edges)
-        for edge in code.edges
-        for target in edge_targets(edge)
+            for code in code_chain(instance.cache)
+            if isdefined(code, :edges)
+            for edge in code.edges
+            for target in edge_targets(edge)
     ]
 end
 
 "`seen`, `frontier` and every method instance reachable from `frontier` through compiled edges."
 function compiled_closure(
-    frontier::Set{Core.MethodInstance},
-    seen::Set{Core.MethodInstance},
-)::Set{Core.MethodInstance}
+        frontier::Set{Core.MethodInstance},
+        seen::Set{Core.MethodInstance},
+    )::Set{Core.MethodInstance}
     if isempty(frontier)
         return seen
     end
@@ -310,21 +315,21 @@ function compiled_items(cache::UnitCache, ran::AbstractVector{Digested})::Vector
     owners = cache.owners
     if any(
             entry.item.kind == :function && !((entry.path, entry.item.first) in owned)
-            for entry in ran
+                for entry in ran
         )
         owners = method_owners(cache.root, cache.items)
     end
     roots = Set(
         instance
-        for (method, entry) in owners
-        if (entry.path, entry.item.first) in started
-        for instance in Base.specializations(method)
+            for (method, entry) in owners
+            if (entry.path, entry.item.first) in started
+            for instance in Base.specializations(method)
     )
     reached = compiled_closure(roots, Set{Core.MethodInstance}())
     return [
         owners[instance.def]
-        for instance in reached
-        if instance.def isa Method && haskey(owners, instance.def)
+            for instance in reached
+            if instance.def isa Method && haskey(owners, instance.def)
     ]
 end
 
@@ -333,7 +338,7 @@ function unit_record(cache::UnitCache, ran::AbstractVector{Digested})::UnitRecor
     paths = unique(entry.path for entry in ran)
     items = Dict(
         path => sort(unique(entry.digest for entry in ran if entry.path == path))
-        for path in paths
+            for path in paths
     )
     start = union(
         Set{String}(),
@@ -344,7 +349,7 @@ function unit_record(cache::UnitCache, ran::AbstractVector{Digested})::UnitRecor
         items,
         Dict(
             name => get(cache.names, name, "")
-            for name in name_closure(cache.mentions, start)
+                for name in name_closure(cache.mentions, start)
         ),
         "",
     )
@@ -374,8 +379,8 @@ function record_counts(record::AbstractString, root::AbstractString)::Vector{Cov
     file = relative_path(root, String(only(files)))
     counts = [
         parse.(Int, first(split(chopprefix(row, "DA:"), ','), 2))
-        for row in rows
-        if startswith(row, "DA:")
+            for row in rows
+            if startswith(row, "DA:")
     ]
     return [CoveredLine(file, line, count) for (line, count) in counts if !isempty(file)]
 end
@@ -388,8 +393,8 @@ function coverage_counts(root::AbstractString)::Dict{Tuple{String, Int}, Int}
     rm(tracefile)
     return Dict(
         (covered.file, covered.line) => covered.count
-        for record in split(text, "end_of_record")
-        for covered in record_counts(record, root)
+            for record in split(text, "end_of_record")
+            for covered in record_counts(record, root)
     )
 end
 
@@ -401,11 +406,11 @@ function ran_record(cache::UnitCache, before::AbstractDict, after::AbstractDict)
     lines = [key for (key, count) in after if count > get(before, key, 0)]
     covered = [
         entry
-        for entry in cache.items
-        if any(
-            path == entry.path && entry.item.first <= line <= entry.item.last
-            for (path, line) in lines
-        )
+            for entry in cache.items
+            if any(
+                path == entry.path && entry.item.first <= line <= entry.item.last
+                for (path, line) in lines
+            )
     ]
     record = unit_record(cache, vcat(covered, compiled_items(cache, covered)))
     unparsed = setdiff(Set(first.(lines)), Set(entry.path for entry in cache.items))
@@ -468,15 +473,17 @@ skips type parameters), the environment and the tracking mode.
 function unit_key(cache::UnitCache, name::AbstractString, compute::Any, config::Any)::String
     configured = bytes2hex(stable_hash(config; version = 4))
     return first(
-        sha1_text([
-            "fallout-unit-2",
-            name,
-            string(typeof(compute)),
-            string(typeof(config)),
-            configured,
-            cache.environment,
-            string(cache.track),
-        ]),
+        sha1_text(
+            [
+                "fallout-unit-2",
+                name,
+                string(typeof(compute)),
+                string(typeof(config)),
+                configured,
+                cache.environment,
+                string(cache.track),
+            ]
+        ),
         24,
     )
 end
@@ -508,7 +515,7 @@ function stored_record(path::AbstractString)::Union{Nothing, UnitRecord}
     table = TOML.parse(String(bytes))
     items = Dict{String, Vector{String}}(
         file => String.(digests)
-        for (file, digests) in table["items"]
+            for (file, digests) in table["items"]
     )
     return UnitRecord(items, Dict{String, String}(table["names"]), table["result"])
 end
@@ -530,13 +537,13 @@ function holding_results(cache::UnitCache, place::AbstractString)::Vector{String
     end
     records = [
         stored_record(joinpath(place, file))
-        for file in readdir(place)
-        if endswith(file, ".toml")
+            for file in readdir(place)
+            if endswith(file, ".toml")
     ]
     holding = unique(
         joinpath(place, record.result * ".jls")
-        for record in records
-        if !isnothing(record) && holds(cache, record)
+            for record in records
+            if !isnothing(record) && holds(cache, record)
     )
     return sort(holding; by = mtime, rev = true)
 end
@@ -557,10 +564,10 @@ end
 
 "Run `compute(config)` and record the code it depends on."
 function run_compute(compute::Any, cache::UnitCache, config::Any)::Tuple{
-    Any,
-    UnitRecord,
-    Float64,
-}
+        Any,
+        UnitRecord,
+        Float64,
+    }
     if cache.track == :sources
         timed = @timed compute(config)
         return (timed.value, unit_record(cache, cache.items), timed.time)
