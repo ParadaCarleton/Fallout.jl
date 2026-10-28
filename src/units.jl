@@ -284,7 +284,25 @@ function check_compute(compute::Any, cache::UnitCache, config::Any)::Nothing
     return nothing
 end
 
-"The key of a unit: its name, its config's stable hash, the environment and the tracking mode."
+"""
+The module-qualified name of `compute`. An anonymous function is an error: its generated
+name shifts when unrelated code above it changes.
+"""
+function unit_name(compute::Any)::String
+    if compute isa Function
+        owner, name = parentmodule(compute), string(nameof(compute))
+    else
+        owner, name = parentmodule(typeof(compute)), string(nameof(typeof(compute)))
+    end
+    if startswith(name, "#")
+        error(
+            "a unit's function must be a named top-level function, not an anonymous function or `do` block",
+        )
+    end
+    return string(owner, ".", name)
+end
+
+"The key of a unit: its function's name, its config's stable hash, the environment and the tracking mode."
 function unit_key(cache::UnitCache, name::AbstractString, config::Any)::String
     configured = bytes2hex(stable_hash(config; version = 4))
     return first(
@@ -374,13 +392,15 @@ function run_compute(compute::Any, cache::UnitCache, config::Any)::Tuple{
 end
 
 """
-    unit(compute, cache, name, config)
+    unit(compute, cache, config)
 
-The result of `compute(config)`, read from `cache` when a unit of this `name`, `config` and
-environment stored one and the code that run executed is unchanged; otherwise computed
-and stored. `compute` captures nothing, so `config` holds every input that matters.
+The result of `compute(config)`, read from `cache` when a unit of this function, `config`
+and environment stored one and the code that run executed is unchanged; otherwise
+computed and stored. `compute` is a named function that captures nothing, so `config`
+holds every input that matters.
 """
-function unit(compute::Any, cache::UnitCache, name::AbstractString, config::Any)
+function unit(compute::Any, cache::UnitCache, config::Any)
+    name = unit_name(compute)
     check_compute(compute, cache, config)
     place = joinpath(cache.dir, unit_key(cache, name, config))
     holding = holding_results(cache, place)

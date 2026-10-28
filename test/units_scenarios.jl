@@ -24,6 +24,7 @@ function package_source(;
     $helper
     "$doc"
     fit(config) = (helper(config.seed), time_ns())
+    twin(config) = (0, time_ns())
     $other
     $extra
     end
@@ -41,7 +42,7 @@ end
 latest(mod::Module, name::Symbol)::Any = Base.invokelatest(getglobal, mod, name)
 
 function fit_unit(cache::Fallout.UnitCache, seed::Integer)::Tuple{Int, UInt64}
-    return Base.invokelatest(unit, latest(latest(Main, :P), :fit), cache, "fit", (; seed))
+    return Base.invokelatest(unit, latest(latest(Main, :P), :fit), cache, (; seed))
 end
 
 "Whether the unit computed its result during this call, rather than reading a stored one."
@@ -61,7 +62,7 @@ const NESTED = """
 module Nest
 using Fallout: unit, unit_cache
 inner(config) = config.seed
-outer(config) = unit(inner, unit_cache(; root = config.root), "inner", (; seed = config.seed))
+outer(config) = unit(inner, unit_cache(; root = config.root), (; seed = config.seed))
 end
 """
 
@@ -92,16 +93,24 @@ if PHASE == "coverage"
         @test computed(load(package_source(); refresh = true), 1)
         refreshed = fit_unit(load(package_source()), 1)
         @test refreshed != first_result
+        # Another function under the same config is another unit.
+        twin = Base.invokelatest(
+            unit,
+            latest(latest(Main, :P), :twin),
+            load(package_source()),
+            (; seed = 1),
+        )
+        @test first(twin) == 0
         serialize(EXPECTED, refreshed)
     end
 
     @testset "units refuse unsafe computations" begin
         cache = load(package_source())
-        @test_throws "capture nothing" unit(Captures(1), cache, "captures", (; seed = 1))
-        @test_throws "outside the tracked root" unit(
-            identity,
+        @test_throws "capture nothing" unit(Captures(1), cache, (; seed = 1))
+        @test_throws "outside the tracked root" unit(identity, cache, (; seed = 1))
+        @test_throws "named top-level function" unit(
+            config -> config.seed,
             cache,
-            "outside",
             (; seed = 1),
         )
         nest = joinpath(TREE, "src", "Nest.jl")
@@ -112,7 +121,6 @@ if PHASE == "coverage"
             unit,
             outer,
             load(package_source()),
-            "outer",
             (; root = TREE, seed = 1),
         )
         rm(nest)
