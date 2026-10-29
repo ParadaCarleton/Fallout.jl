@@ -42,12 +42,12 @@ julia --startup-file=no --project=tia -e 'using Fallout; main(ARGS)' COMMAND [op
 ```
 
 From a clone, `julia --startup-file=no bin/fallout.jl COMMAND [options]` does the same.
-A typical session maps the suite once, then selects for each branch:
+A typical session maps the suite once from a committed tree, then selects for each change:
 
 ```
 fallout build --source src --jobs 8        # writes test-impact-map.toml
-fallout select --trunk main                # testsets this branch can affect
-fallout run --trunk main                   # select, then run them
+fallout select                             # testsets the change since the map can affect
+fallout run                                # select, then run them
 ```
 
 (`fallout` standing for either command line above.)
@@ -73,10 +73,10 @@ Options (`--root` defaults to the current directory, `--map` to `ROOT/test-impac
 | `--timeout SECONDS` | build | Per-testset limit; on timeout the process gets SIGINT, so it still writes its coverage, and SIGKILL if it still runs after another `SECONDS` (at most 120) |
 | `--only SUBSTRING` | build | Map only matching testsets, for a smoke run |
 | `--shard K/N` | build | Map shard K of N |
-| `--commit REV` | build | Commit recorded in the map (default `git rev-parse HEAD`) |
+| `--commit REV` | build | Commit recorded in the map (default `git rev-parse HEAD`); `build` stops if a `.jl` file, environment file or test file differs from it |
 | `--env NAME=VALUE` | build | Environment variable for each testset process; repeatable |
 | `--in MAP` | merge | A shard map, relative to `--root` like `--map`; repeatable |
-| `--base REV`, `--trunk REV`, `--to REV` | select, run | Compare `--base` (default `merge-base(TRUNK, TIP)`, TRUNK default `main`) with `--to` (default the working tree, untracked files included; TIP is then `HEAD`) |
+| `--base REV`, `--to REV` | select, run | Compare `--base` (default the map's commit) with `--to` (default the working tree, untracked files included) |
 
 ## Build the map
 
@@ -104,11 +104,13 @@ fallout.jl merge --map map.toml --in shard-1-map.toml --in shard-2-map.toml ...
 
 ## Select
 
-`select` diffs the branch against its own base: `git merge-base TRUNK TIP`, where TIP is
-`--to REV` (default `HEAD`) and TRUNK is `--trunk REV` (default `main`). `--base REV`
-replaces the merge-base. The other side is the working tree, untracked files included, or
-`--to REV`. In a jj workspace that is not colocated, pass `--to <commit of @>`. Each selected
-testset is printed with the rule that chose it, followed by a regex for the runner.
+`select` diffs the map's commit against the working tree (untracked files included) or
+`--to REV`. The map's coverage describes the code at its commit, so a diff from any other
+commit can miss a testset: a call added on the trunk after the map was built is invisible
+to a diff from the branch's merge-base. `--base REV` replaces the map's commit; use it only
+when REV holds the same code. In a jj workspace that is not colocated, pass
+`--to <commit of @>`. Each selected testset is printed with the rule that chose it, followed
+by a regex for the runner.
 
 | Change | Selected |
 | --- | --- |
@@ -129,10 +131,10 @@ testset is printed with the rule that chose it, followed by a regex for the runn
 - A changed function that no testset executed is printed as `UNCOVERED`. So is a new
   function that no testset runs or names.
 - A file that does not parse stops the selector with the parser's message.
-- The map's commit is not the base, and no base is refused. The map lacks the functions
-  added, renamed or re-signed since it was built; `select` prints how many of the changed
-  functions that is (`map lacks 2 of 9 changed functions`) and lists them. Those are
-  selected by name only (see "What a map knows"). The count says when to rebuild.
+- The map lacks the functions added, renamed or re-signed since it was built; `select`
+  prints how many of the changed functions that is (`map lacks 2 of 9 changed functions`)
+  and lists them. Those are selected by name only (see "What a map knows"). As the map
+  ages, the diff from its commit grows and selects more. The count says when to rebuild.
 
 ## What a map knows
 

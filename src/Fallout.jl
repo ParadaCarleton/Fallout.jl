@@ -1858,6 +1858,23 @@ function build_map(
         commit::AbstractString,
         environment::AbstractVector{Pair{String, String}},
     )::Nothing
+    tests_dir = isempty(suites) ? dirname(tests) : suites
+    uncommitted = [
+        change.path
+            for change in file_changes(root, commit, "")
+            if endswith(change.path, ".jl") ||
+            dependency_file(change.path, sources, project) ||
+            startswith(change.path, tests_dir * "/")
+    ]
+    if !isempty(uncommitted)
+        error(
+            "the working tree differs from commit ",
+            commit,
+            " in ",
+            join(uncommitted, ", "),
+            "; commit the changes first, since the map credits its coverage to that commit",
+        )
+    end
     located = test_items(Snapshot(String(root), ""), tests, suites, suite_pattern)
     testsets = [entry for entry in located if entry.item.kind == :testset]
     dynamic = [
@@ -2072,7 +2089,7 @@ usage: fallout.jl COMMAND [options]
           [--runner test/runtests.jl] [--project .] [--jobs N] [--timeout SECONDS] [--only SUBSTRING]...
           [--shard K/N] [--commit REV] [--env NAME=VALUE]...
   merge   [--map MAP] --in SHARD_MAP --in SHARD_MAP ...
-  select  [--map MAP] [--root DIR] [--base REV] [--trunk REV] [--to REV]
+  select  [--map MAP] [--root DIR] [--base REV] [--to REV]
   run     the options of select; runs the selected testsets through the map's runner,
           in the map's project
 --root defaults to the current directory and MAP to ROOT/test-impact-map.toml.
@@ -2150,7 +2167,6 @@ function select_command(
     )::Nothing
     map = read_map(map_path)
     target = option_value(args, "--to", "")
-    tip = "HEAD"
     if isempty(target)
         toplevel = realpath(strip(git(root, "rev-parse", "--show-toplevel")))
         if toplevel != realpath(root)
@@ -2164,16 +2180,12 @@ function select_command(
         end
     else
         target = strip(git(root, "rev-parse", "--verify", target * "^{commit}"))
-        tip = target
     end
-    trunk = option_value(args, "--trunk", "main")
-    bases = option_values(args, "--base")
-    base = ""
-    if isempty(bases)
-        base = strip(git(root, "merge-base", trunk, tip))
-    else
-        base = last(bases)
+    if !isempty(option_values(args, "--trunk"))
+        error("select takes no --trunk: it diffs from the map's commit, or from --base REV")
     end
+    # The map's coverage describes the code at its commit, so any other base can miss a change.
+    base = option_value(args, "--base", map.commit)
     base = strip(git(root, "rev-parse", "--verify", base * "^{commit}"))
     selection = select_testsets(root, map, String(base), String(target))
     report(stdout, map, selection, base, target)
