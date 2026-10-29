@@ -1,5 +1,5 @@
 # API
 
 ```@autodocs
-Modules = [Fallout]
+Modules = [Fallout, Fallout.StaticMap, Fallout.StaticMap.InferenceWalk]
 ```

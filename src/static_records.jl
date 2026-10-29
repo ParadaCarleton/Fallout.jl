@@ -282,5 +282,5 @@ function frame_record(placements::Placements, edges::FrameEdges)::FrameRecord
     )
 end
 
-"""Whether item `index` belongs to part `part` of `parts`: every `parts`-th item from the `part`-th, so neighbouring testsets of one cost spread over the parts."""
+"""Whether item `index` belongs to part `part` of `parts`: every `parts`-th item from the `part`-th, so neighboring testsets of one cost spread over the parts."""
 in_part(index::Integer, part::Integer, parts::Integer)::Bool = mod(index - 1, parts) == part - 1
