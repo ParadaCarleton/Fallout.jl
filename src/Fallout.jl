@@ -6,8 +6,7 @@ Works for any Julia package whose testsets can be run by name through a runner s
 takes a regex (ReTest's convention), or whose test files are suites of their own that a
 runner script runs by path (`--suites`).
 
-  build   run every top-level testset in its own process with `--code-coverage` and save
-          which source lines each one executed, with the git commit of the tree
+  build   map testsets by coverage, or infer their reach with `--static`
   merge   join the maps of a sharded build
   select  compare the working tree (or `--to REV`) with a base and print the testsets
           whose executed code, or whose referenced definitions, changed
@@ -1532,6 +1531,7 @@ function select_testsets(
             if any_jl &&
             (static_item(located.item) || !isdisjoint(located.item.mentions, static_names))
     ]
+    weak_reasons = [name => "map status is " * entry.status for (name, entry) in map.testsets if any_jl && entry.status != "ok"]
 
     every = vcat(
         run_reasons,
@@ -1542,6 +1542,7 @@ function select_testsets(
         fixture_reasons,
         new_reasons,
         static_reasons,
+        weak_reasons,
     )
     reasons = [pair for pair in every if first(pair) in runnable]
     weak = sort([name for (name, entry) in map.testsets if entry.status != "ok"])
@@ -2059,6 +2060,8 @@ end
 # Command line
 # ---------------------------------------------------------------------------------------
 
+include("static.jl")
+
 function option_values(
         args::AbstractVector{<:AbstractString},
         flag::AbstractString,
@@ -2084,10 +2087,13 @@ end
 
 const USAGE = """
 usage: fallout.jl COMMAND [options]
-  build   [--map MAP] [--root DIR] [--tests test/runtests.jl] [--suites DIR]
+  build   [--static] [--map MAP] [--root DIR] [--tests test/runtests.jl] [--suites DIR]
           [--suite-pattern REGEX] [--source src]...
           [--runner test/runtests.jl] [--project .] [--jobs N] [--timeout SECONDS] [--only SUBSTRING]...
           [--shard K/N] [--commit REV] [--env NAME=VALUE]...
+          [--unresolved drop|follow-known|approximate] [--cache DIR|none]
+          [--workers N] [--setup-file FILE] [--test-module NAME]
+          [--extra-testset-macro NAME[=PREFIX]]... [--progress-interval SECONDS]
   merge   [--map MAP] --in SHARD_MAP --in SHARD_MAP ...
   select  [--map MAP] [--root DIR] [--base REV] [--to REV]
   run     the options of select; runs the selected testsets through the map's runner,
@@ -2108,6 +2114,16 @@ function main(args::AbstractVector{<:AbstractString})::Nothing
     if !isempty(args)
         command = first(args)
     end
+    if command == "--static-build"
+        static_options = StaticMap.parse_options(args)
+        StaticMap.check_build_tree(static_options)
+        StaticMap.build(static_options)
+        return nothing
+    end
+    if command == "--static-worker"
+        StaticMap.walk_part_command(args)
+        return nothing
+    end
     if command == "build"
         sources = option_values(args, "--source")
         if isempty(sources)
@@ -2122,6 +2138,10 @@ function main(args::AbstractVector{<:AbstractString})::Nothing
             commit = strip(git(root, "rev-parse", "HEAD"))
         else
             commit = last(commits)
+        end
+        if "--static" in args
+            StaticMap.build_subprocess(args)
+            return nothing
         end
         build_map(
             root,
@@ -2153,6 +2173,7 @@ function main(args::AbstractVector{<:AbstractString})::Nothing
         return nothing
     end
     if command in ("select", "run")
+        StaticMap.ensure_map(root, map_path, args)
         select_command(root, map_path, args, command == "run")
         return nothing
     end
