@@ -100,7 +100,38 @@ fallout.jl merge --map map.toml --in shard-1-map.toml --in shard-2-map.toml ...
   precompile is built once. The rest then run `--jobs` at a time, longest first.
 - `merge` refuses shards from different commits or files, and a testset mapped twice.
 - A testset's status is `ok`, `failed`, `timeout` or `no-coverage`. Only `ok` coverage is
-  trusted in full; `select` lists every other status as a note.
+  trusted in full; `select` selects every other status after a Julia source edit.
+
+## Static maps
+
+Use `fallout build --static` to infer testset reach without running each testset. Fallout
+compiles top-level testset bodies as functions, follows optimized IR calls, and writes the
+same map format used by `select`. The build runs in the package project in a child process.
+The current tree must match `--commit` in Julia, environment, and test files.
+
+```
+fallout build --static [--unresolved approximate|follow-known|drop] [--cache DIR|none]
+    [--workers N] [--setup-file FILE] [--test-module NAME]
+    [--extra-testset-macro NAME[=PREFIX]]... [--progress-interval SECONDS]
+```
+
+`approximate` is the default. It follows known callees and maps every source function for a
+testset with an unknown callee. `follow-known` drops unknown callees; `drop` drops all dynamic
+sites. The build prints completed testsets and elapsed time every ten seconds by default,
+including work done in child processes.
+
+The default loader reads test definitions without executing `@testset` bodies. Use
+`--setup-file test/static_setup.jl --test-module PackageTests` when a suite has its own
+loader. Use `--extra-testset-macro 'custom_testset=custom: '` to name an additional
+macro's testsets with a prefix matching the runner. The cache defaults to
+`.scratch/static-map-cache` under the root and holds serialized Salsa query storage.
+Its key includes Julia, the Manifest, Fallout's walker, and source definition identities.
+Salsa re-infers frames whose source changes and retains a testset reach result when the
+frame's reached methods and callees stay the same.
+
+`select` and `run` build an absent map statically. They refresh an older static map or walker
+before selection, using its recorded options. A map at `HEAD` remains the baseline for selecting
+uncommitted edits. Coverage maps continue to use their recorded commit.
 
 ## Select
 
