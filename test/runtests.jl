@@ -383,39 +383,26 @@ function printed_by_main(args::AbstractVector{<:AbstractString})::String
     return read(path, String)
 end
 
-@testset "select diffs against the merge-base with the trunk" begin
+@testset "select diffs against the map's commit" begin
     root = mktempdir()
     first_commit = fixture(root)
-    git_run(root, "branch", "-M", "trunk")
-    write_file(
-        root,
-        "src/P.jl",
-        replace(PACKAGE, "f(x) = x + 1" => "extra(x) = x\nf(x) = x + 1"),
-    )
-    git_run(root, "commit", "-q", "-a", "-m", "trunk moves on")
-    git_run(root, "checkout", "-q", "-b", "topic", first_commit)
-    write_file(root, "src/P.jl", replace(PACKAGE, "x + 1" => "x + 2"))
+    extended = replace(PACKAGE, "f(x) = x + 1" => "extra(x) = x\nf(x) = x + 1")
+    write_file(root, "src/P.jl", extended)
+    git_run(root, "commit", "-q", "-a", "-m", "trunk moves on after the map")
+    git_run(root, "checkout", "-q", "-b", "topic")
+    write_file(root, "src/P.jl", replace(extended, "x + 1" => "x + 2"))
     git_run(root, "commit", "-q", "-a", "-m", "topic edits f")
-    arguments = [
-        "select",
-        "--root",
-        root,
-        "--map",
-        joinpath(root, "map.toml"),
-        "--trunk",
-        "trunk",
-        "--to",
-        "topic",
-    ]
+    arguments = ["select", "--root", root, "--map", joinpath(root, "map.toml"), "--to", "topic"]
 
+    # The trunk commit after the map adds `extra`, so the map's commit sees two changes.
     text = printed_by_main(arguments)
     @test occursin("diff $(first(first_commit, 12)) ->", text)
     @test occursin("selected 1 testsets\n  runs f  <- runs changed `f`", text)
-    @test occursin("map lacks 0 of 1 changed functions", text)
+    @test occursin("map lacks 1 of 2 changed functions", text)
 
-    explicit = printed_by_main(vcat(arguments, ["--base", "trunk"]))
-    @test occursin("selected 1 testsets", explicit)
-    @test occursin("map lacks 1 of 2 changed functions", explicit)
+    explicit = printed_by_main(vcat(arguments, ["--base", "topic~1"]))
+    @test occursin("map lacks 0 of 1 changed functions", explicit)
+    @test_throws "no --trunk" Fallout.main(vcat(arguments, ["--trunk", "main"]))
 end
 
 @testset "a name is a static-analysis helper only when every definition of it is" begin
@@ -720,7 +707,8 @@ end
     @test_throws "computed name" Fallout.main(["build", common..., "--tests", "test/computed.jl"])
 
     write_file(root, "src/P.jl", replace(PACKAGE, "return 2x" => "return x + x"))
-    selection = ["--root", root, "--map", "built.toml", "--base", "HEAD"]
+    @test_throws "differs from commit" Fallout.main(["build", common..., "--map", "dirty.toml"])
+    selection = ["--root", root, "--map", "built.toml"]
     @test occursin("pattern: ", printed(["select", selection...]))
     @test occursin("runs g", printed(["run", selection...]))
     write_file(root, "Project.toml", project * "version = \"0.1.0\"\n")
