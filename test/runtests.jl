@@ -799,12 +799,15 @@ end
     @test fingerprint(root, ".") != first_resolution
 end
 
-"A repository with a real runner, so `build`, `update` and `audit` record real coverage."
+"""
+A repository with a real runner, so `build`, `update` and `audit` record real coverage. The
+runner loads the package with `using`, so its definitions do not run under coverage.
+"""
 function recorded_fixture(root::AbstractString)::Nothing
     git_run(root, "init", "-q")
-    write_file(root, "Project.toml", "name = \"P\"\n")
+    write_file(root, "Project.toml", "name = \"P\"\nuuid = \"f0000000-0000-4000-8000-000000000001\"\n")
     write_file(root, "src/P.jl", PACKAGE)
-    write_file(root, "test/runtests.jl", "include(normpath(joinpath(@__DIR__, \"..\", \"src\", \"P.jl\")))\nfor suite in ARGS\n    include(joinpath(@__DIR__, suite))\nend\n")
+    write_file(root, "test/runtests.jl", "using P\nfor suite in ARGS\n    include(joinpath(@__DIR__, suite))\nend\n")
     write_file(root, "test/test_f.jl", "using Test\n@testset \"f\" begin\n    @test P.f(1) == 2\nend\n")
     write_file(root, "test/test_g.jl", "using Test\n@testset \"g\" begin\n    @test P.g(1) == 2\nend\n")
     write_file(root, ".gitignore", "*.toml.work/\n*map*.toml\n")
@@ -813,7 +816,13 @@ function recorded_fixture(root::AbstractString)::Nothing
     return nothing
 end
 
-recorded_rows(path::AbstractString)::Dict{String,Any} = Fallout.TOML.parsefile(path)["testsets"]
+"Rewrite the map at `path` after `edit` changes its parsed document in place."
+function edit_map(edit::Function, path::AbstractString)::Nothing
+    document = Fallout.TOML.parsefile(path)
+    edit(document)
+    open(io -> Fallout.TOML.print(io, document; sorted = true), path, "w")
+    return nothing
+end
 
 @testset "update re-records only what changed and equals a fresh build; audit catches a wrong row" begin
     root = mktempdir()
@@ -826,14 +835,24 @@ recorded_rows(path::AbstractString)::Dict{String,Any} = Fallout.TOML.parsefile(p
     @test built.testsets["test_f.jl"].functions["src/P.jl"] == Set(["f(x)"])
     @test built.testsets["test_g.jl"].functions["src/P.jl"] == Set(["g(x::Int)"])
 
+    # A kept row naming a function no file defines is a selection gap; a changed environment
+    # leaves the kept rows unverified.
+    edit_map(map_path) do document
+        document["meta"]["environment"] = "stale"
+        push!(document["definitions"]["src/P.jl"], "ghost(x)")
+        document["testsets"]["test_f.jl"]["functions"]["src/P.jl"] = "1,5"
+    end
     write_file(root, "src/P.jl", replace(PACKAGE, "return 2x" => "return x + x", "f(x) = x + 1" => "extra(x) = x\nf(x) = x + 1"))
     git_run(root, "commit", "-q", "-am", "edit g, add extra above f")
     head = strip(git_run(root, "rev-parse", "HEAD"))
-    printed_by_main(vcat(["update", "--map", map_path], common))
+    printed_by_main(vcat(["update", "--map", map_path, "--env", "FALLOUT_CHECK=1"], common))
     updated = read_map(map_path)
     @test updated.commit == head
+    @test updated.env == ["FALLOUT_CHECK=1"]
     @test updated.testsets["test_g.jl"].commit == head
     @test updated.testsets["test_f.jl"].commit == base
+    @test updated.testsets["test_f.jl"].verified == ""
+    @test updated.testsets["test_f.jl"].functions["src/P.jl"] == Set(["f(x)"])
     @test updated.definitions["src/P.jl"] == ["extra(x)", "f(x)", "g(x::Int)", "h(s::S)", "unused(x)"]
 
     fresh_path = joinpath(root, "fresh-map.toml")
@@ -842,14 +861,23 @@ recorded_rows(path::AbstractString)::Dict{String,Any} = Fallout.TOML.parsefile(p
     @test fresh.definitions == updated.definitions
     @test Dict(name => row.functions for (name, row) in fresh.testsets) == Dict(name => row.functions for (name, row) in updated.testsets)
 
-    rows = Fallout.TOML.parsefile(map_path)
-    rows["testsets"]["test_f.jl"]["functions"] = Dict{String,Any}("src/P.jl" => "3")
-    open(io -> Fallout.TOML.print(io, rows; sorted = true), map_path, "w")
+    edit_map(map_path) do document
+        document["testsets"]["test_f.jl"]["functions"] = Dict{String, Any}("src/P.jl" => "3")
+    end
     @test_throws "differ from the map" printed_by_main(vcat(["audit", "--map", map_path, "--budget", "60"], common))
     audited = read_map(map_path)
     @test audited.testsets["test_f.jl"].functions["src/P.jl"] == Set(["f(x)"])
     @test audited.testsets["test_f.jl"].verified > updated.testsets["test_f.jl"].verified
     printed_by_main(vcat(["audit", "--map", map_path, "--budget", "60"], common))
+
+    edit_map(map_path) do document
+        document["meta"]["environment"] = "stale"
+        push!(document["definitions"]["src/P.jl"], "ghost(x)")
+    end
+    @test occursin("note: the map was recorded", printed_by_main(["select", "--map", map_path, "--root", root]))
+    @test_throws "rebuild it with `build`" printed_by_main(vcat(["audit", "--map", map_path], common))
+    git_run(root, "commit", "-q", "--allow-empty", "-m", "empty")
+    @test_throws "run `update` first" printed_by_main(vcat(["audit", "--map", map_path], common))
 
     write_file(root, "test/test_new.jl", "using Test\n")
     @test_throws "differs from HEAD" printed_by_main(vcat(["update", "--map", map_path], common))

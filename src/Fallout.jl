@@ -823,12 +823,12 @@ function environment_fingerprint(root::AbstractString, project::AbstractString):
         deps = get(TOML.parsefile(first(manifests)), "deps", Dict{String, Any}())
         packages = [
             string(
-                    name,
-                    ' ',
-                    get(entry, "uuid", ""),
-                    ' ',
-                    get(entry, "git-tree-sha1", get(entry, "version", "")),
-                )
+                name,
+                ' ',
+                get(entry, "uuid", ""),
+                ' ',
+                get(entry, "git-tree-sha1", get(entry, "version", "")),
+            )
                 for (name, entries) in deps
                 for entry in entries
                 if !haskey(entry, "path")
@@ -1476,11 +1476,11 @@ function select_testsets(
         vcat,
         (
             by_coverage(
-                    map,
-                    located.path,
-                    located.item,
-                    "reads changed file `" * basename(path) * "`",
-                )
+                map,
+                located.path,
+                located.item,
+                "reads changed file `" * basename(path) * "`",
+            )
                 for (path, located) in data_readers
         );
         init = Pair{String, String}[],
@@ -1489,16 +1489,16 @@ function select_testsets(
     # (`binding_keys`); code using only Base names reaches no testset.
     unread = [
         string(
-                "changed file `",
-                path,
-                "`: no source function or named constant mentions it",
-            )
+            "changed file `",
+            path,
+            "`: no source function or named constant mentions it",
+        )
             for path in data_files
             if !any(first(pair) == path for pair in data_readers) &&
             !any(
                 occursin(basename(path), binder.item.text) &&
-                    !isempty(binding_keys(binder.item))
-                    for binder in source_binders
+                !isempty(binding_keys(binder.item))
+                for binder in source_binders
             )
     ]
 
