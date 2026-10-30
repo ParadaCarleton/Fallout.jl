@@ -48,6 +48,8 @@ A typical session maps the suite once from a committed tree, then selects for ea
 fallout build --source src --jobs 8        # writes test-impact-map.toml
 fallout select                             # testsets the change since the map can affect
 fallout run                                # select, then run them
+fallout update                             # after a merge: move the map to HEAD
+fallout audit --budget 20                  # nightly: re-check the oldest rows
 ```
 
 (`fallout` standing for either command line above.)
@@ -58,6 +60,8 @@ fallout run                                # select, then run them
 | `merge` | Joins the maps of a sharded build |
 | `select` | Prints the testsets a change can affect, each with the rule that chose it, and a regex for the runner |
 | `run` | `select`, then runs the selected testsets through the runner |
+| `update` | Moves the map to HEAD by re-recording only the testsets the change since the map's commit selects |
+| `audit` | Re-records the testsets verified longest ago, within a time budget, and reports any whose coverage differs from the map |
 
 Options (`--root` defaults to the current directory, `--map` to `ROOT/test-impact-map.toml`):
 
@@ -69,12 +73,13 @@ Options (`--root` defaults to the current directory, `--map` to `ROOT/test-impac
 | `--source DIR` | build | Source directory to cover; repeatable (default `src`) |
 | `--runner FILE` | build, run | Runner script (default `test/runtests.jl`) |
 | `--project DIR` | build | Julia project the runner runs in, relative to `--root` (default `.`); recorded in the map, so `run` uses it too |
-| `--jobs N` | build | Testsets run at once |
-| `--timeout SECONDS` | build | Per-testset limit; on timeout the process gets SIGINT, so it still writes its coverage, and SIGKILL if it still runs after another `SECONDS` (at most 120) |
+| `--jobs N` | build, update, audit | Testsets run at once |
+| `--timeout SECONDS` | build, update, audit | Per-testset limit; on timeout the process gets SIGINT, so it still writes its coverage, and SIGKILL if it still runs after another `SECONDS` (at most 120) |
 | `--only SUBSTRING` | build | Map only matching testsets, for a smoke run |
 | `--shard K/N` | build | Map shard K of N |
 | `--commit REV` | build | Commit recorded in the map (default `git rev-parse HEAD`); `build` stops if a `.jl` file, environment file or test file differs from it |
-| `--env NAME=VALUE` | build | Environment variable for each testset process; repeatable |
+| `--env NAME=VALUE` | build, update, audit | Environment variable for each testset process; repeatable. Recorded in the map; `update` and `audit` reuse the recorded ones unless given |
+| `--budget MINUTES` | audit | Wall time to spend, estimated from the recorded times (default 20) |
 | `--in MAP` | merge | A shard map, relative to `--root` like `--map`; repeatable |
 | `--base REV`, `--to REV` | select, run | Compare `--base` (default the map's commit) with `--to` (default the working tree, untracked files included) |
 
@@ -100,7 +105,42 @@ fallout.jl merge --map map.toml --in shard-1-map.toml --in shard-2-map.toml ...
   precompile is built once. The rest then run `--jobs` at a time, longest first.
 - `merge` refuses shards from different commits or files, and a testset mapped twice.
 - A testset's status is `ok`, `failed`, `timeout` or `no-coverage`. Only `ok` coverage is
-  trusted in full; `select` lists every other status as a note.
+  trusted in full, so every selection includes a testset with another status until it passes.
+- The map also records a fingerprint of the Julia version and of the packages the runner
+  project's manifest resolves (path-tracked ones excluded: git sees their code). Manifests
+  are often not committed, so this is how the map notices a dependency upgrade.
+
+## Keep the map current
+
+A full build costs one process per testset. `update` replaces it after each merge:
+
+```
+fallout update --jobs 4
+```
+
+It selects the testsets the change from the map's commit to HEAD can affect, re-records
+only those, keeps every other row, drops testsets that no longer exist, and moves the map's
+commit to HEAD. The checkout must match HEAD (no edits, no untracked files in the source or
+test directories). Each row records the commit
+and time it was last run at.
+
+Why the result equals a full build: a testset that executed none of the changed code runs
+the same code again, so its recorded coverage cannot change. That holds exactly as far as
+selection is safe (see "Blind spots"). If a kept row names a function that no longer
+exists, selection missed it, and `update` warns. If the environment fingerprint changed,
+the kept rows stay but are marked unverified.
+
+`audit` measures what the rules cannot promise:
+
+```
+fallout audit --budget 20 --jobs 4
+```
+
+It re-records the rows verified longest ago (unverified ones first) until the budget is
+spent, replaces them, and prints `DRIFT` for each row whose functions or status changed.
+That is a change some selection missed, or a testset whose coverage varies from run to run.
+It then exits nonzero. Run nightly, it re-checks every row within a bounded number of days
+without ever running the whole suite at once. The map must be at HEAD (`update` first).
 
 ## Select
 
@@ -122,6 +162,8 @@ by a regex for the runner.
 | a testset | that testset |
 | a test helper or test constant | testsets that mention it, transitively |
 | a non-`.jl` file under the tests directory | testsets whose code or helpers name the file |
+| another non-`.jl` file of the package (`pkg/` for `pkg/src`) | testsets that executed a function naming the file, or one using a constant that names it; a file nothing names is printed as a note |
+| a testset whose recorded status is not `ok` | that testset, on every selection until it passes |
 | any `.jl` file | static-analysis testsets: JET, Aqua, `readdir`/`walkdir`/`pkgdir` scans and `names(mod; all = true)` introspection, and testsets using their helpers. A test name counts as such a helper only if every definition of it reads or analyses code or uses such a helper, and it is not one of Base's names: a struct whose constructor method reports through a scanning helper does not make every testset that builds the struct a static-analysis testset. |
 
 - Blank lines, comments and docstrings are ignored. A change counts if the code tokens
@@ -152,7 +194,7 @@ move line numbers but not headers, so a map stays valid while the code around it
 - A renamed or re-signed function has a new header, so the map lacks it. It is selected
   like a new function: by the testsets that executed another method of its name and the
   testsets that mention the name, and printed as `UNCOVERED` when neither exists.
-- Only a rebuild refreshes coverage for new, renamed and rewritten code.
+- Only a rebuild or `update` refreshes coverage for new, renamed and rewritten code.
 
 ## Blind spots
 
@@ -174,6 +216,15 @@ move line numbers but not headers, so a map stays valid while the code around it
   dependencies) is not covered. A change there selects only the static-analysis testsets.
 - A static-analysis testset cannot say which files it reads, so any `.jl` change
   selects all of them, a test-only edit included (JET then runs for a test edit).
+- A data file read through a computed path (a directory listing, a name built at run
+  time) is not named in the code, so its change selects nothing; it is printed as a note.
+- A method added to a function owned elsewhere (`Base.show`, `Base.convert`) changes
+  callers inside that other package, which are not covered. Testsets that executed code
+  mentioning the method's types are selected; others that reach it only through the
+  other package are not. `audit` reports such misses after the fact.
+- A dependency upgrade changes no tracked file. The fingerprint notices it (`select`
+  prints a note, `update` marks rows unverified), but nothing reruns until `audit` gets
+  to them.
 
 ## Tests
 
