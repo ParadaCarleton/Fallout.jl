@@ -582,6 +582,14 @@ end
     @test !dependency_file("pkg/src/data.toml", ["pkg/src"], ".")
 end
 
+@testset "a non-.jl file is a fixture, data of the package holding a source, or ignored" begin
+    path_class = Fallout.path_class
+    @test path_class("pkg/test/table.csv", Set{String}(), "pkg/test", ["pkg/src"]) == :fixture
+    @test path_class("pkg/data/table.csv", Set{String}(), "pkg/test", ["pkg/src"]) == :data
+    @test path_class("README.md", Set{String}(), "test", ["src"]) == :data
+    @test path_class("docs/index.md", Set{String}(), "pkg/test", ["pkg/src"]) == :ignored
+end
+
 @testset "path options take the form git reports paths in" begin
     path_option = Fallout.path_option
     @test path_option("./test/") == "test"
