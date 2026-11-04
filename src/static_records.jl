@@ -77,7 +77,7 @@ function hoisted_imports(expression::Expr)::Vector{Expr}
     if expression.head in (:using, :import)
         return Expr[expression]
     end
-    return reduce(vcat, (hoisted_imports(argument) for argument in expression.args); init = Expr[])
+    return collect(Expr, Iterators.flatten((hoisted_imports(argument) for argument in expression.args)))
 end
 hoisted_imports(::Any)::Vector{Expr} = Expr[]
 
@@ -111,7 +111,7 @@ function extra_testset_names(expression::Expr, macros::AbstractVector{String})::
             names = String[string(macro_prefix(first(matching)), argument) for argument in expression.args if argument isa String]
         end
     end
-    nested = reduce(vcat, (extra_testset_names(argument, macros) for argument in expression.args); init = String[])
+    nested = collect(String, Iterators.flatten((extra_testset_names(argument, macros) for argument in expression.args)))
     return vcat(names, nested)
 end
 extra_testset_names(::Any, ::AbstractVector{String})::Vector{String} = String[]

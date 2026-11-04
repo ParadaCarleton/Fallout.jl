@@ -629,7 +629,7 @@ and environment stored one and the code that run executed is unchanged; otherwis
 computed and stored. `compute` is a named function that captures nothing, so `config`
 holds every input that matters.
 """
-function unit(compute::Any, cache::UnitCache, config::Any)
+function unit(compute::Any, cache::UnitCache, config::Any)::Any
     name = unit_name(compute)
     check_compute(compute, cache, config)
     place = joinpath(cache.dir, unit_key(cache, name, compute, config))
