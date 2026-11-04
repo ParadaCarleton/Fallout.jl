@@ -3,3 +3,5 @@ Manifest.toml
 docs/build/
 docs/src/index.md
 *.cov
+# Temporary folders the units tests make in the working directory.
+jl_*/

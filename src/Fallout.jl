@@ -2060,6 +2060,9 @@ end
 # Command line
 # ---------------------------------------------------------------------------------------
 
+"The map a command reads or writes without `--map`, relative to the root."
+const DEFAULT_MAP = "test-impact-map.toml"
+
 include("static.jl")
 
 function option_values(
@@ -2109,7 +2112,7 @@ a map that does not match the files) is an uncaught error, so the process exits 
 """
 function main(args::AbstractVector{<:AbstractString})::Nothing
     root = abspath(option_value(args, "--root", pwd()))
-    map_path = abspath(root, option_value(args, "--map", "test-impact-map.toml"))
+    map_path = abspath(root, option_value(args, "--map", DEFAULT_MAP))
     command = ""
     if !isempty(args)
         command = first(args)

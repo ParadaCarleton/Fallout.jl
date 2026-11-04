@@ -250,6 +250,52 @@ function method_location(placements::Placements, method::Method)::Tuple{String, 
 end
 
 """
+    dependency_paths(placements, edges)
+
+The tracked files of every method whose inference result `edges` name, followed through each
+callee's own edges: a frame's types depend on the return types of its callees, and theirs on
+their callees' code, so an edit to any of those files can change what the frame calls.
+"""
+function dependency_paths(placements::Placements, edges::AbstractVector)::Set{String}
+    paths = Set{String}()
+    seen = Base.IdSet{Any}()
+    pending = Any[edges...]
+    while !isempty(pending)
+        edge = pop!(pending)
+        if edge in seen
+            continue
+        end
+        push!(seen, edge)
+        edge_dependencies!(pending, paths, placements, edge)
+    end
+    return paths
+end
+
+"""Add the tracked file of `edge`'s method to `paths` and its own edges to `pending`."""
+function edge_dependencies!(pending::Vector{Any}, paths::Set{String}, placements::Placements, edge::Core.CodeInstance)::Nothing
+    push!(pending, edge.def)
+    if isdefined(edge, :edges) && edge.edges isa Core.SimpleVector
+        append!(pending, edge.edges)
+    end
+    return nothing
+end
+function edge_dependencies!(pending::Vector{Any}, paths::Set{String}, placements::Placements, edge::Core.MethodInstance)::Nothing
+    push!(pending, edge.def)
+    if isdefined(edge, :cache)
+        push!(pending, edge.cache)
+    end
+    return nothing
+end
+function edge_dependencies!(::AbstractVector, paths::Set{String}, placements::Placements, edge::Method)::Nothing
+    path = tracked_path(placements, edge)
+    if haskey(placements.files, path)
+        push!(paths, path)
+    end
+    return nothing
+end
+edge_dependencies!(::AbstractVector, ::Set{String}, ::Placements, ::Any)::Nothing = nothing
+
+"""
     place(placements, method)
 
 The `Definition` number of the tracked function holding `method`'s first line; 0 for a method
