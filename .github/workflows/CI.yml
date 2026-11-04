@@ -40,6 +40,11 @@ jobs:
           lcov -a stable.info -o merged.info >/dev/null
           awk -F'[:,]' '/^SF:/ {file = $2} /^DA:/ && $3 == 0 {print file ":" $2}' merged.info
           grep -Eq 'lines\.*: 100\.0%' summary.txt
+      # Coverage blocks inlining and constant folding, which the static walk reads; users run without it.
+      - uses: julia-actions/julia-runtest@v1
+        if: matrix.version == '1'
+        with:
+          coverage: false
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -50,6 +55,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Corset's fatou rule runs the fatou that mise.toml pins.
+      - uses: jdx/mise-action@v2
       - uses: julia-actions/setup-julia@v2
         with:
           version: '1'
