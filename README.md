@@ -129,9 +129,11 @@ Its key includes Julia, the Manifest, Fallout's walker, and source definition id
 Salsa re-infers frames whose source changes and retains a testset reach result when the
 frame's reached methods and callees stay the same.
 
-`select` and `run` build an absent map statically. They refresh an older static map or walker
-before selection, using its recorded options. A map at `HEAD` remains the baseline for selecting
-uncommitted edits. Coverage maps continue to use their recorded commit.
+`select` and `run` build an absent map statically, at `HEAD`. A static map stays at its commit
+when `HEAD` moves, as a coverage map does, so `select` still diffs from that commit and sees the
+commits since. A static map built by another walker or Julia is rebuilt at its own commit with its
+recorded options. Both builds run in a temporary checkout of the commit, so uncommitted edits
+neither block them nor reach the map; an untracked Manifest is copied in.
 
 ## Select
 
