@@ -1,0 +1,9 @@
+result = "a5f9a40dfb31c3414f31715f"
+
+[items]
+"src/P.jl" = ["20d6390ed78b2acaab324bcd6dba9c6986b17318"]
+
+[names]
+config = ""
+greet = "6707a2034e3ef1b5763911a242f00b25d99b5bc0"
+text = ""

@@ -1,0 +1,10 @@
+result = "24d40b7613426e49b46a32f9"
+
+[items]
+"src/P.jl" = ["4affd8273e31ae577d2f539728daf36ed7eec1d3", "5282d89d52e0a8fae64cd1333565f37b7dda0514"]
+
+[names]
+A = "67ca2759f11657e371402bed471f38a0b15c2dca"
+config = ""
+g = "46ee6005fe1457729503db5865a4e59398c835a9"
+qualified = "0c4a7f7b45ee8ec12d17191feb1a7b83cc13c851"

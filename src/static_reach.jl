@@ -140,12 +140,24 @@ function scope_type_names!(names::Set{Core.TypeName}, modules::AbstractVector{Mo
     return nothing
 end
 
-"""What one frame's IR calls: methods reached, signatures to walk next, one label per unresolved site."""
+"""
+What one frame's IR calls: methods reached, signatures to walk next, one label per unresolved
+site, and the inference edges its types were inferred from (`dependencies`).
+"""
 struct FrameEdges
     methods::Vector{Method}
     callees::Vector{Type}
     unresolved::Vector{String}
     everything::Bool
+    dependencies::Vector{Any}
+end
+
+"""The inference edges of `code`: the code instances whose results its types were inferred from."""
+function inference_edges(code::Core.CodeInfo)::Vector{Any}
+    if isdefined(code, :edges) && code.edges isa Core.SimpleVector
+        return Any[code.edges...]
+    end
+    return Any[]
 end
 
 """What one call site leads to: the scope methods it dispatches to, the frames to walk, and whether it was left unresolved or reaches anything."""
@@ -596,7 +608,7 @@ function code_edges(mode::WalkMode, code::Core.CodeInfo, scope::Scope)::FrameEdg
             end
         ) for (site, outcome) in zip(sites, outcomes) if outcome.unresolved
     ]
-    return FrameEdges(unique(methods), unique(callees), labels, any(outcome -> outcome.unknown && mode isa FollowUnresolved, outcomes))
+    return FrameEdges(unique(methods), unique(callees), labels, any(outcome -> outcome.unknown && mode isa FollowUnresolved, outcomes), inference_edges(code))
 end
 
 """The type of the function `method` belongs to, a type variable's bound for a method of `(::T)(…) where T`."""
@@ -615,8 +627,8 @@ end
 
 """What one `code_typed_by_type` entry calls: its IR's edges, or just its method when inference returned no IR."""
 entry_edges(mode::WalkMode, code::Core.CodeInfo, scope::Scope)::FrameEdges = code_edges(mode, code, scope)
-entry_edges(::WalkMode, method::Method, ::Scope)::FrameEdges = FrameEdges(Method[method], Type[], String[], false)
-entry_edges(::WalkMode, ::Any, ::Scope)::FrameEdges = FrameEdges(Method[], Type[], String[], false)
+entry_edges(::WalkMode, method::Method, ::Scope)::FrameEdges = FrameEdges(Method[method], Type[], String[], false, Any[])
+entry_edges(::WalkMode, ::Any, ::Scope)::FrameEdges = FrameEdges(Method[], Type[], String[], false, Any[])
 
 """The call a statement of unoptimized IR makes: the statement, or the right side of a slot assignment."""
 function assigned_call(statement::Expr)::Expr
@@ -730,6 +742,7 @@ function folded_edges(mode::WalkMode, signature::Type, scope::Scope)::FrameEdges
         ),
         String[],
         false,
+        collect(Any, Iterators.flatten(inference_edges(code) for code in codes)),
     )
 end
 
@@ -748,6 +761,7 @@ function frame_edges(mode::WalkMode, signature::Type, scope::Scope)::FrameEdges
         unique(reduce(vcat, (edge.callees for edge in edges); init = Type[])),
         vcat(untyped, reduce(vcat, (edge.unresolved for edge in edges); init = String[])),
         any(edge -> edge.everything, edges) || (!isempty(untyped) && mode isa FollowUnresolved),
+        collect(Any, Iterators.flatten(edge.dependencies for edge in edges)),
     )
 end
 

@@ -6,7 +6,7 @@ using Serialization: Serialization
 using TOML: TOML
 
 const TIA = Fallout
-const CACHE_FORMAT = "static-map-cache 4"
+const CACHE_FORMAT = "static-map-cache 5"
 include("static_inference_walk.jl")
 include("static_records.jl")
 include("static_queries.jl")
@@ -164,12 +164,34 @@ function compile_body(test_module::Module, source::TestsetSource, index::Int, ma
     return BodyOutcome(Tuple{typeof(Base.invokelatest(getglobal, test_module, name))}, "")
 end
 
-"""Drop testset calls while loading definitions from test files."""
+"""
+Drop top-level testset calls while loading definitions from test files. A testset inside a
+function definition (a helper that runs one) is replaced by its body instead, as in a compiled
+testset body, so the helper still reaches what its testset calls.
+"""
 struct DropTestsets <: Function
     macros::Vector{String}
 end
 
+"""Whether `expression` defines a function or a macro: `function f() … end`, `f() = …`, `() -> …`."""
+function function_definition(expression::Expr)::Bool
+    if expression.head in (:function, :macro, :->)
+        return true
+    end
+    if expression.head === :(=) && first(expression.args) isa Expr
+        signature = first(expression.args)
+        while signature isa Expr && signature.head in (:where, :(::))
+            signature = first(signature.args)
+        end
+        return signature isa Expr && signature.head === :call
+    end
+    return false
+end
+
 function (mapper::DropTestsets)(expression::Expr)::Any
+    if function_definition(expression)
+        return without_testsets(expression, mapper.macros)
+    end
     if expression.head === :macrocall
         head = first(expression.args)
         if head isa Symbol
@@ -180,15 +202,20 @@ function (mapper::DropTestsets)(expression::Expr)::Any
         end
     end
     if expression.head === :call && first(expression.args) === :include
-        return :(Main.Fallout.StaticMap.transformed_include(@__MODULE__, $(mapper(last(expression.args))), $(mapper.macros)))
+        path = mapper(last(expression.args))
+        if length(expression.args) == 3
+            return :(Main.Fallout.StaticMap.transformed_include(@__MODULE__, $path, $(mapper.macros), $(mapper(expression.args[2]))))
+        end
+        return :(Main.Fallout.StaticMap.transformed_include(@__MODULE__, $path, $(mapper.macros)))
     end
     return Expr(expression.head, Any[mapper(argument) for argument in expression.args]...)
 end
 (::DropTestsets)(expression::Any)::Any = expression
 
-"""Include a test file after removing its testset calls."""
-function transformed_include(test_module::Module, path::AbstractString, macros::AbstractVector{String})::Any
-    return Base.include(DropTestsets(String[macros...]), test_module, path)
+"""Include a test file after removing its testset calls, after the file's own `mapexpr` when it names one."""
+function transformed_include(test_module::Module, path::AbstractString, macros::AbstractVector{String}, mapexpr::Function = identity)::Any
+    mapper = DropTestsets(String[macros...])
+    return Base.include(expression -> mapper(mapexpr(expression)), test_module, path)
 end
 
 """Load the definitions of a test suite or include a caller-provided setup file."""
@@ -425,7 +452,9 @@ function walk_part(
             end
             Threads.atomic_add!(done, 1)
             if !isempty(progress_file)
-                write(progress_file, string(done[]))
+                # Written whole and renamed into place, so the parent never reads a partial count.
+                write(string(progress_file, ".partial"), string(done[]))
+                mv(string(progress_file, ".partial"), progress_file; force = true)
             end
         end
     finally
@@ -466,23 +495,31 @@ function worker_command(options::Options, part::Integer, parts::Integer, partial
 end
 
 """
-    walk_in_workers(options, workers)
+    walk_in_workers(options, workers, total)
 
-Walk the testsets to walk in `workers` processes, each a part of them, and read back what each walked.
+Walk the `total` testsets to walk in `workers` processes, each a part of them, and read back what each walked.
 A process infers on about 1.5 cores whatever its thread count, which is why the walk is split by process.
 """
-function walk_in_workers(options::Options, workers::Integer)::Vector{PartialWalk}
-    directory = joinpath(options.root, ".scratch", "static-map-workers")
-    mkpath(directory)
+function walk_in_workers(options::Options, workers::Integer, total::Integer)::Vector{PartialWalk}
+    # A directory of this build's own, so concurrent builds of one root do not share files.
+    directory = mktempdir()
+    try
+        return walk_in_directory(options, workers, total, directory)
+    finally
+        rm(directory; recursive = true, force = true)
+    end
+end
+
+"""The walk of `walk_in_workers`, its workers' files in `directory`."""
+function walk_in_directory(options::Options, workers::Integer, total::Integer, directory::AbstractString)::Vector{PartialWalk}
     partials = String[joinpath(directory, string("part-", part, ".jls")) for part in 1:workers]
     logs = String[joinpath(directory, string("part-", part, ".log")) for part in 1:workers]
     threads = clamp(Threads.nthreads() ÷ workers, 1, 4)
     processes = [run(pipeline(worker_command(options, part, workers, partials[part], threads); stdout = logs[part], stderr = logs[part]); wait = false) for part in 1:workers]
     started = time_ns()
-    total = length(prepare(options).sources)
     while any(Base.process_running, processes)
         sleep(options.progress_interval)
-        completed = sum(parse(Int, read(path, String)) for path in string.(partials, ".progress") if isfile(path); init = 0)
+        completed = sum(something(tryparse(Int, read(path, String)), 0) for path in string.(partials, ".progress") if isfile(path); init = 0)
         println(
             stderr, "[static_map] progress ", completed, "/", total,
             " testsets across ", workers, " workers, ", round((time_ns() - started) / 1.0e9; digits = 1), " s"
@@ -503,9 +540,7 @@ function walk_in_workers(options::Options, workers::Integer)::Vector{PartialWalk
     if !isempty(failed)
         error("static map workers ", failed, " failed")
     end
-    walks = PartialWalk[Serialization.deserialize(partial) for partial in partials]
-    rm(directory; recursive = true)
-    return walks
+    return PartialWalk[Serialization.deserialize(partial) for partial in partials]
 end
 
 """Build a static map from Salsa reach queries and write Fallout's map format."""
@@ -516,7 +551,7 @@ function build(options::Options)::Nothing
     walks = if workers == 1
         PartialWalk[walk_part(options, preparation, 1, 1, started)]
     else
-        walk_in_workers(options, workers)
+        walk_in_workers(options, workers, length(preparation.sources))
     end
     results = Dict{String, ReachResult}()
     failures = Dict{String, String}()
@@ -529,13 +564,14 @@ function build(options::Options)::Nothing
     unresolved = Set{String}()
     unmapped = Set{String}()
     for source in preparation.sources
-        status, previous = get(outcomes, source.name, ("no-coverage", Set{Int}()))
+        status, previous = get(outcomes, source.name, ("ok", Set{Int}()))
         if !haskey(results, source.key)
-            outcomes[source.name] = (status, previous)
+            # One body of a repeated name that did not compile leaves the name's reach unknown.
+            outcomes[source.name] = ("no-coverage", previous)
             continue
         end
         reached = results[source.key]
-        outcomes[source.name] = ("ok", union(previous, reached.positions))
+        outcomes[source.name] = (status, union(previous, reached.positions))
         if reached.everything
             everything = union(everything, Set{String}([source.name]))
         end
@@ -625,7 +661,7 @@ function parse_options(args::AbstractVector{<:AbstractString})::Options
     cache = option_value(args, "--cache", joinpath(root, ".scratch", "static-map-cache"))
     return Options(
         root,
-        abspath(root, option_value(args, "--map", joinpath(".scratch", "static-map.toml"))),
+        abspath(root, option_value(args, "--map", TIA.DEFAULT_MAP)),
         option_value(args, "--tests", "test/runtests.jl"),
         if isempty(sources)
             ["src"]
@@ -662,27 +698,76 @@ function build_subprocess(args::AbstractVector{<:AbstractString})::Nothing
     fallout_root = dirname(@__DIR__)
     load_path = join((project_path, fallout_root, "@stdlib"), separator)
     script = joinpath(fallout_root, "bin", "fallout.jl")
-    command = Cmd(`$(Base.julia_cmd()) --startup-file=no --project=$project_path $script --static-build $args`; dir = root)
+    # The child runs in `root`, so a relative `--root` would be read against itself: the last value wins.
+    arguments = vcat(String[args...], String["--root", root])
+    command = Cmd(`$(Base.julia_cmd()) --startup-file=no --project=$project_path $script --static-build $arguments`; dir = root)
     run(addenv(command, "JULIA_LOAD_PATH" => load_path))
     return nothing
 end
 
-"""Build a missing or stale static map before selecting tests."""
+"""
+    build_at_commit(root, commit, map_path, args)
+
+Build the static map of `commit` to `map_path` in a temporary checkout of it, so neither edits in
+the working tree (which `select` then diffs from `commit`) nor commits after it are credited to the
+map. Environment files the checkout lacks (an untracked Manifest) are copied from `root`.
+"""
+function build_at_commit(root::AbstractString, commit::AbstractString, map_path::AbstractString, args::AbstractVector{<:AbstractString})::Nothing
+    cache = option_value(args, "--cache", joinpath(".scratch", "static-map-cache"))
+    if cache != "none"
+        cache = abspath(root, cache)
+    end
+    toplevel = realpath(strip(TIA.git(root, "rev-parse", "--show-toplevel")))
+    checkout = mktempdir()
+    tree = joinpath(checkout, "tree")
+    TIA.git(root, "worktree", "add", "--detach", "--quiet", tree, commit)
+    try
+        tree_root = normpath(joinpath(tree, relpath(realpath(root), toplevel)))
+        copy_environments(root, tree_root, option_value(args, "--project", "."))
+        build_subprocess(vcat(String[args...], String["--root", tree_root, "--map", String(map_path), "--cache", cache, "--commit", String(commit)]))
+    finally
+        TIA.git(root, "worktree", "remove", "--force", tree)
+        rm(checkout; recursive = true, force = true)
+    end
+    return nothing
+end
+
+"""Copy the `Project.toml` and `Manifest*.toml` files of `root`, its project and its `test` folder that `tree` lacks."""
+function copy_environments(root::AbstractString, tree::AbstractString, project::AbstractString)::Nothing
+    for folder in unique(normpath.(String[".", project, "test"]))
+        source = joinpath(root, folder)
+        if !isdir(source)
+            continue
+        end
+        for name in readdir(source)
+            environment = name == "Project.toml" || (startswith(name, "Manifest") && endswith(name, ".toml"))
+            target = joinpath(tree, folder, name)
+            if environment && !ispath(target)
+                mkpath(dirname(target))
+                cp(joinpath(source, name), target)
+            end
+        end
+    end
+    return nothing
+end
+
+"""
+Build a missing or outdated static map before selecting tests: an absent map is built at `HEAD`, a
+static map from another walker or Julia is rebuilt at its own commit with its recorded options. A
+static map stays at its commit when `HEAD` moves, as a coverage map does, so `select` still diffs
+from it and sees the commits since.
+"""
 function ensure_map(
         root::AbstractString, map_path::AbstractString,
         args::AbstractVector{<:AbstractString}
     )::Nothing
     if !isfile(map_path)
-        build_subprocess(vcat(String["build", "--static", "--root", String(root), "--map", String(map_path)], String[args...]))
+        build_at_commit(root, strip(TIA.git(root, "rev-parse", "HEAD")), map_path, args)
         return nothing
     end
     document = TOML.parsefile(map_path)
     meta = document["meta"]
-    if !haskey(meta, "static")
-        return nothing
-    end
-    commit = strip(TIA.git(root, "rev-parse", "HEAD"))
-    if meta["commit"] == commit && get(meta, "builder_fingerprint", "") == builder_fingerprint()
+    if !haskey(meta, "static") || get(meta, "builder_fingerprint", "") == builder_fingerprint()
         return nothing
     end
     sources = reduce(vcat, (["--source", String(source)] for source in meta["sources"]); init = String[])
@@ -692,15 +777,14 @@ function ensure_map(
         cache_option = "none"
     end
     settings = String[
-        "build", "--static", "--root", String(root), "--map", String(map_path),
+        "build", "--static",
         "--tests", String(meta["tests"]), "--runner", String(meta["runner"]),
         "--project", String(get(meta, "project", ".")), "--unresolved", String(meta["static"]),
         "--setup-file", String(get(meta, "setup_file", "")),
         "--test-module", String(get(meta, "test_module", "StaticMapTests")),
         "--cache", cache_option,
-        "--commit", commit,
     ]
-    build_subprocess(vcat(settings, sources, macros, String[args...]))
+    build_at_commit(root, String(meta["commit"]), map_path, vcat(settings, sources, macros, String[args...]))
     return nothing
 end
 

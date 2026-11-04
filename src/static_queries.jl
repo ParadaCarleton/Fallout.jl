@@ -30,17 +30,15 @@ Base.isequal(left::FrameRecord, right::FrameRecord)::Bool =
 @declare_input testset_code_hash(runtime::Salsa.Runtime, name::String)::String
 @declare_input method_inventory_hash(runtime::Salsa.Runtime)::String
 
-"""Infer one frame and track the source files of its methods."""
+"""Infer one frame and track the source files its inference read: those of its methods and, through the inference edges, of every callee whose return type it used."""
 @derived function reached_frame(runtime::Salsa.Runtime, signature::Type)::FrameRecord
     context = Salsa.context(runtime)::QueryContext
     method_inventory_hash(runtime)
     Threads.atomic_add!(context.frame_runs, 1)
     edges = frame_edges(context.mode, signature, context.scope)
-    for method in edges.methods
-        path = tracked_path(context.placements, method)
-        if haskey(context.placements.files, path)
-            source_code_hash(runtime, path)
-        end
+    paths = dependency_paths(context.placements, vcat(Any[edges.methods...], edges.dependencies))
+    for path in sort!(collect(paths))
+        source_code_hash(runtime, path)
     end
     for callee in edges.callees
         context.signatures[type_key(callee)] = callee
