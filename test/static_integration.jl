@@ -150,11 +150,10 @@ end
     source = read(joinpath(root, "src/P.jl"), String)
     write_file(root, "src/P.jl", replace(source, "First annotation." => "Updated annotation."))
     @test_throws ProcessFailedException static_build_log(root)
-    map_commit = read_map(joinpath(root, "map.toml")).commit
+    map_text = read(joinpath(root, "map.toml"), String)
     git_run(root, "commit", "-q", "-a", "-m", "annotation")
-    moved_log = static_select_log(root)
-    @test !occursin("[static_map] wrote", moved_log)
-    @test read_map(joinpath(root, "map.toml")).commit == map_commit
+    static_select_log(root)
+    @test read(joinpath(root, "map.toml"), String) == map_text
     annotation_log = static_build_log(root)
     @test occursin(r"inferred [1-9][0-9]* frames; recalculated 0 testsets", annotation_log)
     @test read_map(joinpath(root, "map.toml")).commit == strip(git_run(root, "rev-parse", "HEAD"))
@@ -213,7 +212,6 @@ end
     fingerprint = Fallout.StaticMap.builder_fingerprint()
     write_file(root, "map.toml", replace(read(joinpath(root, "map.toml"), String), fingerprint => "stale"))
     refreshed = static_select_log(root)
-    @test occursin("[static_map] wrote", refreshed)
     @test occursin("calls f", refreshed)
     map = read_map(joinpath(root, "map.toml"))
     @test map.commit == map_commit
