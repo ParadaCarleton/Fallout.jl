@@ -46,7 +46,7 @@ end
 """
 
 function git_run(root::AbstractString, args::AbstractString...)::String
-    command = `git -C $root -c user.name=check -c user.email=check@example.com $(collect(args))`
+    command = `git -C $root -c user.name=check -c user.email=check@example.com -c core.hooksPath=/dev/null $(collect(args))`
     return read(command, String)
 end
 
@@ -741,3 +741,6 @@ end
     @test_throws "--code-coverage=@DIR" Fallout.tracked_root(1, "")
     @test Fallout.tracked_root(1, tree) == tree
 end
+
+include("static_map.jl")
+include("static_integration.jl")

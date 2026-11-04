@@ -33,7 +33,12 @@ jobs:
         if: matrix.version == '1'
         run: |
           sudo apt-get install -y lcov
-          lcov --summary lcov.info 2>&1 | tee summary.txt
+          # Only Julia 1.14 loads static_reach_114.jl; the `pre` job runs it.
+          lcov --remove lcov.info '*/static_reach_114.jl' -o stable.info >/dev/null
+          lcov --summary stable.info 2>&1 | tee summary.txt
+          # Print each uncovered line as file:line, merging the records of every process.
+          lcov -a stable.info -o merged.info >/dev/null
+          awk -F'[:,]' '/^SF:/ {file = $2} /^DA:/ && $3 == 0 {print file ":" $2}' merged.info
           grep -Eq 'lines\.*: 100\.0%' summary.txt
   lint:
     runs-on: ubuntu-latest
