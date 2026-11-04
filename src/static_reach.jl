@@ -260,7 +260,7 @@ function matching_methods(signature::Type)::Union{Nothing, Vector{Core.MethodMat
 end
 
 """Normalize the compiler's method-table result."""
-method_matches(matches::Vector)::Vector{Core.MethodMatch} = Core.MethodMatch[match for match in matches]
+method_matches(matches::AbstractVector)::Vector{Core.MethodMatch} = Core.MethodMatch[match for match in matches]
 method_matches(::Any)::Nothing = nothing
 
 """
@@ -353,7 +353,7 @@ function site_edges(mode::WalkMode, code::Core.CodeInfo, statement::Expr, scope:
 end
 
 """Convert method matches to a dynamic call site's reach edges."""
-function matched_site_edges(matches::Union{Nothing, Vector{Core.MethodMatch}}, scope::Scope, resolved::Bool, mode::WalkMode)::SiteEdges
+function matched_site_edges(matches::Union{Nothing, AbstractVector{Core.MethodMatch}}, scope::Scope, resolved::Bool, mode::WalkMode)::SiteEdges
     if isnothing(matches)
         return SiteEdges(Method[], Type[], true, true)
     end
@@ -435,7 +435,7 @@ function closure_parameters(type::Any, depth::Int)::Vector{Type}
     else
         Type[]
     end
-    return vcat(own, reduce(vcat, (closure_parameters(parameter, depth + 1) for parameter in body.parameters); init = Type[]))
+    return vcat(own, collect(Type, Iterators.flatten((closure_parameters(parameter, depth + 1) for parameter in body.parameters))))
 end
 
 """
@@ -453,7 +453,7 @@ function handed_types(code::Core.CodeInfo, statement::Expr)::Vector{Type}
     end
     types = Type[value_type(code, argument) for argument in site_arguments(statement)]
     if container_site(code, statement)
-        return reduce(vcat, (closure_parameters(type, 0) for type in types); init = Type[])
+        return collect(Type, Iterators.flatten((closure_parameters(type, 0) for type in types)))
     end
     return types
 end
@@ -515,7 +515,7 @@ function callable_seeds(types::AbstractVector{Type}, scope::Scope)::Vector{Type}
     for type in types
         scope_type_names!(names, scope.modules, type, 0)
     end
-    nested = reduce(vcat, (closure_parameters(type, 0) for type in types); init = Type[])
+    nested = collect(Type, Iterators.flatten((closure_parameters(type, 0) for type in types)))
     candidates = vcat(types, nested, Type[name.wrapper for name in names])
     return unique(Type[Tuple{type, Vararg{Any}} for type in candidates if callable_type(scope, type)])
 end
@@ -530,14 +530,14 @@ function outside_seeds(types::AbstractVector{Type}, scope::Scope)::Vector{Type}
             union!(names, Set{Core.TypeName}([body.name]))
         end
     end
-    return unique(reduce(vcat, (get(scope.outside, name, Type[]) for name in names); init = Type[]))
+    return unique(collect(Type, Iterators.flatten((get(scope.outside, name, Type[]) for name in names))))
 end
 
 """The optimized IR of every method `signature` matches, with the debug info that names what was inlined, or none when inference cannot type it."""
 function typed_frames(signature::Type)::Vector{Any}
     return try
         Base.code_typed_by_type(signature; optimize = true, debuginfo = :source)
-    catch
+    catch # lint: broad-catch  inference of an arbitrary signature can fail any way; `frame_edges` counts the frame as untyped
         Any[]
     end
 end
@@ -554,7 +554,7 @@ function debuginfo_methods(info::Core.DebugInfo)::Vector{Method}
     if info.linetable isa Core.DebugInfo
         nested = vcat(nested, Any[info.linetable])
     end
-    return vcat(definition_methods(info.def), reduce(vcat, (debuginfo_methods(edge) for edge in nested if edge isa Core.DebugInfo); init = Method[]))
+    return vcat(definition_methods(info.def), collect(Method, Iterators.flatten((debuginfo_methods(edge) for edge in nested if edge isa Core.DebugInfo))))
 end
 
 """Follow a invoked method when it may call code in scope."""
@@ -583,13 +583,13 @@ function code_edges(mode::WalkMode, code::Core.CodeInfo, scope::Scope)::FrameEdg
     outcomes = SiteEdges[site_edges(mode, code, site, scope) for site in sites]
     methods = vcat(
         definition_methods(code.parent), debuginfo_methods(code.debuginfo), Method[instance.def for instance in invoked],
-        reduce(vcat, (outcome.methods for outcome in outcomes); init = Method[]),
+        collect(Method, Iterators.flatten((outcome.methods for outcome in outcomes))),
     )
     seen = escaping_types(code, statements, scope)
     ran = Type[type for type in (function_type(method) for method in methods) if type <: Function && type !== typeof(Core.kwcall)]
     callees = vcat(
         Type[instance.specTypes for instance in invoked if traversable_instance(instance, scope)],
-        reduce(vcat, (outcome.callees for outcome in outcomes); init = Type[]),
+        collect(Type, Iterators.flatten((outcome.callees for outcome in outcomes))),
         callable_seeds(vcat(seen, boxed_types(code, statements), created_closures(code)), scope),
         outside_seeds(unique(vcat(seen, ran)), scope),
         owned_seeds(definition_methods(code.parent), scope),
@@ -617,7 +617,7 @@ function_type_head(type::TypeVar)::Type = type.ub
 
 """The scope's methods naming no scope type of functions the package of a frame's `methods` owns (`Scope`'s `owned`)."""
 function owned_seeds(methods::AbstractVector{Method}, scope::Scope)::Vector{Type}
-    return unique(reduce(vcat, (get(scope.owned, Base.moduleroot(method.module), Type[]) for method in methods); init = Type[]))
+    return unique(collect(Type, Iterators.flatten((get(scope.owned, Base.moduleroot(method.module), Type[]) for method in methods))))
 end
 
 """What one `code_typed_by_type` entry calls: its IR's edges, or just its method when inference returned no IR."""
@@ -713,7 +713,7 @@ calls by name gets a `FoldedCalls` frame, which finds the dead branches of an in
 function folded_edges(mode::WalkMode, signature::Type, scope::Scope)::FrameEdges
     typed = try
         Base.code_typed_by_type(signature; optimize = false)
-    catch
+    catch # lint: broad-catch  inference of an arbitrary signature can fail any way; `typed_frames` reports the frame
         Any[]
     end
     codes = Core.CodeInfo[first(entry) for entry in typed if first(entry) isa Core.CodeInfo && first(entry).ssavaluetypes isa Vector]
@@ -728,10 +728,10 @@ function folded_edges(mode::WalkMode, signature::Type, scope::Scope)::FrameEdges
             for (live, statement, type, live_statement) in statements if !dropped_call(statement, type) && call_statement(statement)
     ]
     return FrameEdges(
-        unique(reduce(vcat, (outcome.methods for outcome in vcat(dropped, called)); init = Method[])),
+        unique(collect(Method, Iterators.flatten((outcome.methods for outcome in vcat(dropped, called))))),
         unique(
             vcat(
-                reduce(vcat, (outcome.callees for outcome in dropped); init = Type[]),
+                collect(Type, Iterators.flatten((outcome.callees for outcome in dropped))),
                 Type[FoldedCalls{callee} for outcome in called for callee in outcome.callees],
             )
         ),
@@ -752,9 +752,9 @@ function frame_edges(mode::WalkMode, signature::Type, scope::Scope)::FrameEdges
         untyped = ["an untyped frame"]
     end
     return FrameEdges(
-        unique(reduce(vcat, (edge.methods for edge in edges); init = Method[])),
-        unique(reduce(vcat, (edge.callees for edge in edges); init = Type[])),
-        vcat(untyped, reduce(vcat, (edge.unresolved for edge in edges); init = String[])),
+        unique(collect(Method, Iterators.flatten((edge.methods for edge in edges)))),
+        unique(collect(Type, Iterators.flatten((edge.callees for edge in edges)))),
+        vcat(untyped, collect(String, Iterators.flatten((edge.unresolved for edge in edges)))),
         any(edge -> edge.everything, edges) || (!isempty(untyped) && mode isa FollowUnresolved),
         collect(Any, Iterators.flatten(edge.dependencies for edge in edges)),
     )

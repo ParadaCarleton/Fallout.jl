@@ -86,7 +86,7 @@ function identifier_texts(node::JS.SyntaxNode)::Vector{String}
         return String[]
     end
     parts = JS.children(node)
-    inner = reduce(vcat, (identifier_texts(part) for part in parts); init = String[])
+    inner = collect(String, Iterators.flatten((identifier_texts(part) for part in parts)))
     # `Symbol("TOL")` names `TOL` as `:TOL` does.
     if JS.kind(node) == K"call" && length(parts) == 2
         callee, argument = parts
@@ -122,7 +122,7 @@ function include_paths(node::JS.SyntaxNode)::Vector{String}
             return [path]
         end
     end
-    return reduce(vcat, (include_paths(part) for part in parts); init = String[])
+    return collect(String, Iterators.flatten((include_paths(part) for part in parts)))
 end
 
 "The name a function signature defines; a callable object's methods are known by its type."
@@ -176,11 +176,7 @@ function binding_targets(node::JS.SyntaxNode)::Vector{String}
         return binding_targets(first(JS.children(node)))
     end
     if kind in (K"tuple", K"parens")
-        return reduce(
-            vcat,
-            (binding_targets(part) for part in JS.children(node));
-            init = String[],
-        )
+        return collect(String, Iterators.flatten((binding_targets(part) for part in JS.children(node))))
     end
     return String[]
 end
@@ -203,7 +199,7 @@ function testset_nodes(node::JS.SyntaxNode)::Vector{JS.SyntaxNode}
         if lstrip(String(JS.sourcetext(first(parts))), '@') == "testset"
             return [node]
         end
-        return reduce(vcat, (testset_nodes(part) for part in parts); init = JS.SyntaxNode[])
+        return collect(JS.SyntaxNode, Iterators.flatten((testset_nodes(part) for part in parts)))
     end
     return JS.SyntaxNode[]
 end
@@ -242,7 +238,7 @@ function describe_core(core::JS.SyntaxNode)::Tuple{Symbol, String, Vector{String
         return (:binding, name, [name], "")
     end
     if kind in (K"const", K"global", K"local")
-        targets = reduce(vcat, (binding_targets(part) for part in parts); init = String[])
+        targets = collect(String, Iterators.flatten((binding_targets(part) for part in parts)))
         return (:binding, "", targets, "")
     end
     if kind == K"="
@@ -288,11 +284,7 @@ function node_items(
         # Julia 1.14 puts a syntax `VERSION` node before the name.
         name = only(part for part in parts if JS.kind(part) == K"Identifier")
         inner = join(filter(!isempty, [scope, String(JS.sourcetext(name))]), '.')
-        return reduce(
-            vcat,
-            (node_items(part, 0:-1, inner) for part in JS.children(last(parts)));
-            init = Item[],
-        )
+        return collect(Item, Iterators.flatten((node_items(part, 0:-1, inner) for part in JS.children(last(parts)))))
     end
     if kind == K"doc"
         parts = JS.children(node)
@@ -336,7 +328,7 @@ end
 "The top-level items of a file (modules are entered; their own line is not an item)."
 function source_items(text::AbstractString, label::AbstractString)::Vector{Item}
     parts = JS.children(parse_source(text, label))
-    return reduce(vcat, (node_items(part, 0:-1, "") for part in parts); init = Item[])
+    return collect(Item, Iterators.flatten((node_items(part, 0:-1, "") for part in parts)))
 end
 
 # ---------------------------------------------------------------------------------------
@@ -382,11 +374,7 @@ path_option(path::AbstractString)::String = String(rstrip(slashed(normpath(path)
 "The items of `path` at `snapshot`, followed by the items of each file it includes, recursively."
 function located_items(snapshot::Snapshot, path::AbstractString)::Vector{Located}
     items = source_items(read_file(snapshot, path), label(snapshot, path))
-    return reduce(
-        vcat,
-        (included_items(snapshot, path, item) for item in items);
-        init = Located[],
-    )
+    return collect(Located, Iterators.flatten((included_items(snapshot, path, item) for item in items)))
 end
 
 function included_items(snapshot::Snapshot, path::AbstractString, item::Item)::Vector{
@@ -396,7 +384,7 @@ function included_items(snapshot::Snapshot, path::AbstractString, item::Item)::V
         located_items(snapshot, slashed(normpath(joinpath(dirname(path), file))))
             for file in item.includes
     )
-    return vcat([Located(String(path), item)], reduce(vcat, nested; init = Located[]))
+    return vcat([Located(String(path), item)], collect(Located, Iterators.flatten(nested)))
 end
 
 """
@@ -445,13 +433,13 @@ function suite_items(
         dir::AbstractString,
         pattern::AbstractString,
     )::Vector{Located}
-    return reduce(
-        vcat,
-        (
-            suite_file_items(snapshot, dir, path)
-                for path in suite_paths(snapshot, dir, pattern)
-        );
-        init = Located[],
+    return collect(
+        Located, Iterators.flatten(
+            (
+                suite_file_items(snapshot, dir, path)
+                    for path in suite_paths(snapshot, dir, pattern)
+            )
+        )
     )
 end
 
@@ -467,14 +455,14 @@ function suite_file_items(
     )::Vector{Located}
     text = read_file(snapshot, path)
     items = source_items(text, label(snapshot, path))
-    includes = unique(reduce(vcat, (item.includes for item in items); init = String[]))
-    nested = reduce(
-        vcat,
-        (
-            located_items(snapshot, slashed(normpath(joinpath(dirname(path), file))))
-                for file in includes
-        );
-        init = Located[],
+    includes = unique(collect(String, Iterators.flatten((item.includes for item in items))))
+    nested = collect(
+        Located, Iterators.flatten(
+            (
+                located_items(snapshot, slashed(normpath(joinpath(dirname(path), file))))
+                    for file in includes
+            )
+        )
     )
     inner = [located.item for located in nested if located.item.kind == :testset]
     name = relpath_slash(path, dir)
@@ -993,11 +981,11 @@ function file_delta(
     hunks = [hunk for hunk in change.hunks if !ignorable(hunk, old_items, new_items)]
     old_hit = unique(
         item_start,
-        reduce(vcat, (items_hit_old(old_items, hunk) for hunk in hunks); init = Item[]),
+        collect(Item, Iterators.flatten((items_hit_old(old_items, hunk) for hunk in hunks))),
     )
     new_hit = unique(
         item_start,
-        reduce(vcat, (items_hit_new(new_items, hunk) for hunk in hunks); init = Item[]),
+        collect(Item, Iterators.flatten((items_hit_new(new_items, hunk) for hunk in hunks))),
     )
     return Delta(change.path, old_hit, new_hit)
 end
@@ -1044,11 +1032,7 @@ import_item(item::Item)::Bool = item.kind == :other &&
 "The names the `using` and `import` statements among `items` bring in."
 function imported_names(items::AbstractVector{Item})::Vector{String}
     return unique(
-        reduce(
-            vcat,
-            (binding_keys(item) for item in items if import_item(item));
-            init = String[],
-        )
+        collect(String, Iterators.flatten((binding_keys(item) for item in items if import_item(item))))
     )
 end
 
@@ -1067,7 +1051,7 @@ function delta_names(delta::Delta)::Vector{String}
     dropped = setdiff(imported_names(delta.old_hit), imported_names(delta.new_hit))
     return unique(
         vcat(
-            reduce(vcat, (binding_keys(item) for item in touched); init = String[]),
+            collect(String, Iterators.flatten((binding_keys(item) for item in touched))),
             dropped,
         )
     )
@@ -1081,14 +1065,14 @@ changed name defines nothing new.
 function name_closure(seeds::Set{String}, binders::AbstractVector{Located})::Set{String}
     grown = union(
         seeds,
-        reduce(
-            vcat,
-            (
-                binder.item.keys
-                    for binder in binders
-                    if !isdisjoint(binder.item.mentions, seeds)
-            );
-            init = String[],
+        collect(
+            String, Iterators.flatten(
+                (
+                    binder.item.keys
+                        for binder in binders
+                        if !isdisjoint(binder.item.mentions, seeds)
+                )
+            )
         ),
     )
     if length(grown) == length(seeds)
@@ -1112,11 +1096,7 @@ out, so ordinary testsets that use it are not taken for static analysis.
 """
 function static_closure(names::Set{String}, binders::AbstractVector{Located})::Set{String}
     candidates = unique(
-        reduce(
-            vcat,
-            (binder.item.keys for binder in binders if static_user(binder.item, names));
-            init = String[],
-        )
+        collect(String, Iterators.flatten((binder.item.keys for binder in binders if static_user(binder.item, names))))
     )
     grown = union(
         names,
@@ -1291,13 +1271,13 @@ function select_testsets(
     ]
     any_jl = any(endswith(change.path, ".jl") for change in changes)
 
-    changed = reduce(
-        vcat,
-        (
-            [Located(delta.path, item) for item in delta.old_hit if item.kind == :function]
-                for delta in source_deltas
-        );
-        init = Located[],
+    changed = collect(
+        Located, Iterators.flatten(
+            (
+                [Located(delta.path, item) for item in delta.old_hit if item.kind == :function]
+                    for delta in source_deltas
+            )
+        )
     )
     lacking = [
         located
@@ -1309,11 +1289,7 @@ function select_testsets(
             for located in changed
             if !isempty(mapped_file(map, located.path, located.item))
     ]
-    added = reduce(
-        vcat,
-        (added_functions(delta) for delta in source_deltas);
-        init = Located[],
-    )
+    added = collect(Located, Iterators.flatten((added_functions(delta) for delta in source_deltas)))
     absent = vcat(
         lacking,
         [
@@ -1332,18 +1308,18 @@ function select_testsets(
         )
             for located in absent
     ]
-    run_reasons = reduce(
-        vcat,
-        (
-            by_coverage(
-                map,
-                located.path,
-                located.item,
-                "runs changed `" * located.item.name * "`",
+    run_reasons = collect(
+        Pair{String, String}, Iterators.flatten(
+            (
+                by_coverage(
+                    map,
+                    located.path,
+                    located.item,
+                    "runs changed `" * located.item.name * "`",
+                )
+                    for located in executed
             )
-                for located in executed
-        );
-        init = Pair{String, String}[],
+        )
     )
     uncovered = [
         string(
@@ -1357,41 +1333,37 @@ function select_testsets(
             if isempty(covering(map, located.path, located.item))
     ]
 
-    old_sources = reduce(
-        vcat,
-        (
-            [Located(path, item) for item in items_at(old_snapshot, path, true)]
-                for path in source_files(root, base, map.sources)
-        );
-        init = Located[],
+    old_sources = collect(
+        Located, Iterators.flatten(
+            (
+                [Located(path, item) for item in items_at(old_snapshot, path, true)]
+                    for path in source_files(root, base, map.sources)
+            )
+        )
     )
     widened = unique(
         vcat(
-            reduce(vcat, (widened_names(delta) for delta in source_deltas); init = String[]),
+            collect(String, Iterators.flatten((widened_names(delta) for delta in source_deltas))),
             [located.item.name for located in lacking],
         )
     )
-    dispatch_reasons = reduce(
-        vcat,
-        (
-            by_coverage(
-                map,
-                located.path,
-                located.item,
-                "dispatch: methods of `" * located.item.name * "` changed",
+    dispatch_reasons = collect(
+        Pair{String, String}, Iterators.flatten(
+            (
+                by_coverage(
+                    map,
+                    located.path,
+                    located.item,
+                    "dispatch: methods of `" * located.item.name * "` changed",
+                )
+                    for located in old_sources
+                    if located.item.kind == :function && located.item.name in widened
             )
-                for located in old_sources
-                if located.item.kind == :function && located.item.name in widened
-        );
-        init = Pair{String, String}[],
+        )
     )
 
     source_seeds = Set(
-        reduce(
-            vcat,
-            (delta_names(delta) for delta in source_deltas);
-            init = String[],
-        )
+        collect(String, Iterators.flatten((delta_names(delta) for delta in source_deltas)))
     )
     source_binders = [
         located
@@ -1399,22 +1371,22 @@ function select_testsets(
             if located.item.kind in (:binding, :other)
     ]
     source_names = name_closure(source_seeds, source_binders)
-    mention_reasons = reduce(
-        vcat,
-        (
-            by_coverage(
-                map,
-                located.path,
-                located.item,
-                "mentions changed definition `" *
-                    first(sort(collect(intersect(located.item.mentions, source_names)))) *
-                    "`",
+    mention_reasons = collect(
+        Pair{String, String}, Iterators.flatten(
+            (
+                by_coverage(
+                    map,
+                    located.path,
+                    located.item,
+                    "mentions changed definition `" *
+                        first(sort(collect(intersect(located.item.mentions, source_names)))) *
+                        "`",
+                )
+                    for located in old_sources
+                    if located.item.kind == :function &&
+                    !isdisjoint(located.item.mentions, source_names)
             )
-                for located in old_sources
-                if located.item.kind == :function &&
-                !isdisjoint(located.item.mentions, source_names)
-        );
-        init = Pair{String, String}[],
+        )
     )
 
     new_testsets = [located for located in new_tests if located.item.kind == :testset]
@@ -1439,23 +1411,19 @@ function select_testsets(
         )
     end
     helper_seeds = Set(
-        reduce(
-            vcat,
-            ([name for name in delta_names(delta)] for delta in test_deltas);
-            init = String[],
-        )
+        collect(String, Iterators.flatten(([name for name in delta_names(delta)] for delta in test_deltas)))
     )
-    helper_functions = reduce(
-        vcat,
-        (
-            [
-                item.name
-                    for item in vcat(delta.old_hit, delta.new_hit)
-                    if item.kind == :function
-            ]
-                for delta in test_deltas
-        );
-        init = String[],
+    helper_functions = collect(
+        String, Iterators.flatten(
+            (
+                [
+                    item.name
+                        for item in vcat(delta.old_hit, delta.new_hit)
+                        if item.kind == :function
+                ]
+                    for delta in test_deltas
+            )
+        )
     )
     fixtures = [
         basename(change.path)
@@ -1468,14 +1436,14 @@ function select_testsets(
             if located.item.kind in (:function, :binding, :other)
     ]
     fixture_seeds = Set(
-        reduce(
-            vcat,
-            (
-                binding_keys(binder.item)
-                    for binder in test_binders
-                    if any(occursin(file, binder.item.text) for file in fixtures)
-            );
-            init = String[],
+        collect(
+            String, Iterators.flatten(
+                (
+                    binding_keys(binder.item)
+                        for binder in test_binders
+                        if any(occursin(file, binder.item.text) for file in fixtures)
+                )
+            )
         )
     )
     test_names = name_closure(
@@ -1929,7 +1897,7 @@ function build_map(
     mkpath(logs)
     covered = realpath(joinpath(root, length(sources) == 1 ? first(sources) : ""))
     snapshot = Snapshot(String(root), "")
-    paths = reduce(vcat, (jl_files(root, dir) for dir in sources); init = String[])
+    paths = collect(String, Iterators.flatten((jl_files(root, dir) for dir in sources)))
     functions = Dict(path => file_functions(snapshot, path) for path in paths)
     definitions = Dict(
         path => String[item.header for item in items]
@@ -2024,11 +1992,7 @@ function merge_maps(out::AbstractString, inputs::AbstractVector{<:AbstractString
             )
         end
     end
-    names = reduce(
-        vcat,
-        (collect(keys(document["testsets"])) for document in documents);
-        init = String[],
-    )
+    names = collect(String, Iterators.flatten((collect(keys(document["testsets"])) for document in documents)))
     if !allunique(names)
         error(
             "testsets mapped by more than one shard: ",

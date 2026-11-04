@@ -79,7 +79,7 @@ function read_cache(path::AbstractString, expected_key::AbstractString)::Salsa.D
     end
     loaded = try
         Base.invokelatest(Serialization.deserialize, path)
-    catch
+    catch # lint: broad-catch  a damaged or older cache file can fail to read any way; the walk then starts afresh
         nothing
     end
     if loaded isa CacheEnvelope && loaded.format == CACHE_FORMAT && loaded.key == expected_key
@@ -155,7 +155,7 @@ function compile_body(test_module::Module, source::TestsetSource, index::Int, ma
         end
         Core.eval(test_module, definition)
         ""
-    catch exception
+    catch exception # lint: broad-catch  a testset body can fail to compile any way; the map records it as uncompiled
         sprint(showerror, exception)
     end
     if !isempty(failure)
@@ -340,13 +340,13 @@ function prepare(options::Options)::Preparation
     snapshot = TIA.Snapshot(options.root, "")
     located = TIA.located_items(snapshot, options.tests)
     test_files = unique(String[entry.path for entry in located])
-    source_files = reduce(vcat, (tracked_files(options.root, directory) for directory in options.sources); init = String[])
+    source_files = collect(String, Iterators.flatten((tracked_files(options.root, directory) for directory in options.sources)))
     files = unique(vcat(source_files, test_files))
     inventories = FileInventory[
         file_inventory(snapshot, path, path in source_files, options.extra_testset_macros)
             for path in files
     ]
-    definitions = reduce(vcat, (inventory.functions for inventory in inventories); init = Definition[])
+    definitions = collect(Definition, Iterators.flatten((inventory.functions for inventory in inventories)))
     placements = placements_of(options.root, definitions)
     sources = testset_sources(located, options.extra_testset_macros)
     if isempty(sources)
@@ -356,7 +356,7 @@ function prepare(options::Options)::Preparation
         error("a testset has a computed name")
     end
     file_hashes = Dict{String, String}(path => ast_hash(TIA.read_file(snapshot, path)) for path in files)
-    others = reduce(vcat, (inventory.others for inventory in inventories); init = OtherItem[])
+    others = collect(OtherItem, Iterators.flatten((inventory.others for inventory in inventories)))
     inventory_hash = cache_key_of(String[string(item.file, ':', item.name, ':', item.hash) for item in others])
     environments = String[
         read(joinpath(folder, name), String)
@@ -483,13 +483,13 @@ end
 
 """The command line of worker `part` of `parts`: this build's options, and the file its walk goes to."""
 function worker_command(options::Options, part::Integer, parts::Integer, partial::AbstractString, threads::Integer)::Cmd
-    sources = reduce(vcat, (["--source", source] for source in options.sources); init = String[])
+    sources = collect(String, Iterators.flatten((["--source", source] for source in options.sources)))
     cache = if isempty(options.cache_directory)
         "none"
     else
         options.cache_directory
     end
-    macros = reduce(vcat, (["--extra-testset-macro", macro_spec] for macro_spec in options.extra_testset_macros); init = String[])
+    macros = collect(String, Iterators.flatten((["--extra-testset-macro", macro_spec] for macro_spec in options.extra_testset_macros)))
     arguments = ["--static-worker", "--root", options.root, "--tests", options.tests, "--runner", options.runner, "--project", options.project, "--commit", options.commit, "--unresolved", mode_name(options.mode), "--cache", cache, "--part", string(part, '/', parts), "--partial", partial, "--progress-file", string(partial, ".progress"), "--setup-file", options.setup_file, "--test-module", options.test_module, "--progress-interval", string(options.progress_interval), sources..., macros...]
     return `$(Base.julia_cmd()) --startup-file=no --project=$(Base.active_project()) --threads=$threads $(joinpath(@__DIR__, "..", "bin", "fallout.jl")) $arguments`
 end
@@ -767,8 +767,8 @@ function ensure_map(
     if !haskey(meta, "static") || get(meta, "builder_fingerprint", "") == builder_fingerprint()
         return nothing
     end
-    sources = reduce(vcat, (["--source", String(source)] for source in meta["sources"]); init = String[])
-    macros = reduce(vcat, (["--extra-testset-macro", String(name)] for name in get(meta, "extra_testset_macros", String[])); init = String[])
+    sources = collect(String, Iterators.flatten((["--source", String(source)] for source in meta["sources"])))
+    macros = collect(String, Iterators.flatten((["--extra-testset-macro", String(name)] for name in get(meta, "extra_testset_macros", String[]))))
     cache_option = String(get(meta, "cache", joinpath(root, ".scratch", "static-map-cache")))
     if isempty(cache_option)
         cache_option = "none"
