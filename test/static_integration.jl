@@ -219,9 +219,12 @@ end
     @test length(split(strip(git_run(root, "worktree", "list")), '\n')) == 1
 end
 
-@testset "select builds an absent static map at HEAD past a dirty tree" begin
+@testset "select builds an absent static map at HEAD past a dirty tree, with an ignored Manifest" begin
     root = mktempdir()
     chain_fixture(root)
+    write_file(root, ".gitignore", "map.toml\ncache/\nManifest-v0.1.toml\n")
+    git_run(root, "commit", "-q", "-a", "-m", "ignore a Manifest")
+    write_file(root, "Manifest-v0.1.toml", "")
     write_file(root, "src/h.jl", "function h(x::Int)\n    return x + 2\nend\n")
     selected = static_select_log(root)
     @test occursin("calls f", selected)
@@ -254,9 +257,11 @@ end
             end
         end
         checked = (x -> @testset "anonymous" begin @test P.h(x) > 0 end)
+        typed(x::T) where {T} = @testset "typed" begin @test P.k(x) > 0 end
         @testset "via helper" begin
             check(1)
             checked(1)
+            typed(1)
         end
         @testset "repeated" begin
             @test P.h(1) > 0
@@ -271,7 +276,7 @@ end
     static_build_log(root; workers = 2)
     map = read_map(joinpath(root, "map.toml"))
     @test map.testsets["via helper"].status == "ok"
-    @test map.testsets["via helper"].functions == Dict("src/g.jl" => Set(["g(x::Int)"]), "src/h.jl" => Set(["h(x::Int)"]))
+    @test map.testsets["via helper"].functions == Dict("src/g.jl" => Set(["g(x::Int)"]), "src/h.jl" => Set(["h(x::Int)"]), "src/k.jl" => Set(["k(x::Int)"]))
     @test map.testsets["repeated"].status == "no-coverage"
 end
 

@@ -736,10 +736,7 @@ end
 function copy_environments(root::AbstractString, tree::AbstractString, project::AbstractString)::Nothing
     for folder in unique(normpath.(String[".", project, "test"]))
         source = joinpath(root, folder)
-        if !isdir(source)
-            continue
-        end
-        for name in readdir(source)
+        for name in (isdir(source) ? readdir(source) : String[])
             environment = name == "Project.toml" || (startswith(name, "Manifest") && endswith(name, ".toml"))
             target = joinpath(tree, folder, name)
             if environment && !ispath(target)

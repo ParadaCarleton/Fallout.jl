@@ -153,12 +153,7 @@ struct FrameEdges
 end
 
 """The inference edges of `code`: the code instances whose results its types were inferred from."""
-function inference_edges(code::Core.CodeInfo)::Vector{Any}
-    if isdefined(code, :edges) && code.edges isa Core.SimpleVector
-        return Any[code.edges...]
-    end
-    return Any[]
-end
+inference_edges(code::Core.CodeInfo)::Vector{Any} = isdefined(code, :edges) && code.edges isa Core.SimpleVector ? Any[code.edges...] : Any[]
 
 """What one call site leads to: the scope methods it dispatches to, the frames to walk, and whether it was left unresolved or reaches anything."""
 struct SiteEdges
