@@ -763,6 +763,88 @@ end
     @test_throws "needs a value" Fallout.main(["build", "--map"])
 end
 
+"A commit holding the working tree of `root`, untracked files included, made through a throwaway index."
+function snapshot_commit(root::AbstractString)::String
+    index = tempname()
+    try
+        environment = ("GIT_INDEX_FILE" => index,)
+        withenv(environment...) do
+            git_run(root, "read-tree", "HEAD")
+            git_run(root, "add", "-A")
+            tree = strip(git_run(root, "write-tree"))
+            return String(strip(git_run(root, "commit-tree", tree, "-p", "HEAD", "-m", "snapshot")))
+        end
+    finally
+        rm(index; force = true)
+    end
+end
+
+@testset "a base that holds an untracked file compares its text" begin
+    root = mktempdir()
+    fixture(root)
+    write_file(root, "src/extra.jl", "extra(x) = x\n")
+    write_file(root, "src/P.jl", replace(PACKAGE, "unused(x) = x" => "unused(x) = x\ninclude(\"extra.jl\")"))
+    snapshot = snapshot_commit(root)
+    map = read_map(joinpath(root, "map.toml"))
+    # Unchanged since the snapshot: git calls the untracked file deleted, yet nothing changed.
+    @test isempty(Fallout.file_changes(root, snapshot, ""))
+    @test isempty(select_testsets(root, map, snapshot, "").reasons)
+    write_file(root, "src/extra.jl", "extra(x) = x + 1\n")
+    changes = Fallout.file_changes(root, snapshot, "")
+    @test [(change.path, change.status) for change in changes] == [("src/extra.jl", :modified)]
+    @test length(only(only(changes).hunks).added) == 1
+end
+
+@testset "affected testsets leave out the rules that fire for any change" begin
+    selection = Fallout.Selection(
+        [
+            "a" => "runs changed `f` (src/P.jl:1-1)",
+            "b" => Fallout.STATIC_ANALYSIS_REASON,
+            "c" => Fallout.PARTIAL_COVERAGE_REASON * "timeout",
+            "d" => Fallout.NEW_TESTSET_REASON,
+            "b" => "edited testset (test/runtests.jl:3-5)",
+        ],
+        String[], String[], String[], 0, String[],
+    )
+    @test Fallout.affected_testsets(selection) == ["a", "b"]
+    @test Fallout.testset_names(selection) == ["a", "b", "c", "d"]
+end
+
+@testset "refresh brings a coverage map up to the working tree" begin
+    root = mktempdir()
+    fixture(root)
+    write_file(root, "Project.toml", "name = \"P\"\nuuid = \"f0000000-0000-4000-8000-000000000001\"\n")
+    write_file(root, "test/retest.jl", RUNNER)
+    write_file(root, "test/slow.jl", "")
+    git_run(root, "add", "-A")
+    git_run(root, "commit", "-q", "-m", "runner")
+    Fallout.main(["build", "--root", root, "--runner", "test/retest.jl", "--map", "built.toml", "--jobs", "4"])
+    before = read_map(joinpath(root, "built.toml"))
+    @test before.testsets["runs g"].functions == Dict("src/P.jl" => Set(["g(x::Int)"]))
+
+    # An uncommitted edit: g now calls f. The map does not know "runs g" runs f.
+    write_file(root, "src/P.jl", replace(PACKAGE, "return 2x" => "return f(x) + x - 1"))
+    snapshot = snapshot_commit(root)
+    ran = Fallout.refresh_map(root, snapshot; map = "built.toml", jobs = 2)
+    @test ran == ["runs g"]
+    after = read_map(joinpath(root, "built.toml"))
+    @test after.commit == snapshot
+    @test after.testsets["runs g"].functions == Dict("src/P.jl" => Set(["f(x)", "g(x::Int)"]))
+    @test after.testsets["runs f"].functions == before.testsets["runs f"].functions
+    @test after.testsets["runs f"].ms == before.testsets["runs f"].ms
+    @test after.testsets["uses S"].functions == before.testsets["uses S"].functions
+    @test Set(keys(after.testsets)) == Set(keys(before.testsets))
+    # The refreshed map selects "runs g" for a change to f, which the old one could not.
+    write_file(root, "src/P.jl", replace(PACKAGE, "return 2x" => "return f(x) + x - 1", "x + 1" => "x + 2"))
+    refreshed = select_testsets(root, after, after.commit, "")
+    @test Fallout.affected_testsets(refreshed) == ["runs f", "runs g"]
+    @test ("runs g" => "runs changed `f` (src/P.jl:6-6)") in refreshed.reasons
+    write_file(root, "src/P.jl", replace(PACKAGE, "return 2x" => "return f(x) + x - 1"))
+    # A snapshot of the same tree leaves the map alone.
+    @test isempty(Fallout.refresh_map(root, snapshot_commit(root); map = "built.toml"))
+    @test read_map(joinpath(root, "built.toml")).commit == snapshot
+end
+
 """
 Run the unit scenarios' `phase` in a child process. It tracks coverage of this package,
 which holds `tree`, so the child's runs of Fallout count toward the package's coverage.

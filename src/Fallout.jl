@@ -24,8 +24,8 @@ import Base.JuliaSyntax as JS
 using Base.JuliaSyntax: @K_str
 
 export main, unit, unit_cache, UnitCache
-public EditSelector, select_edit, select_testsets, testset_names, read_map,
-    runner_arguments, retest_pattern, Selection, CoverageMap
+public EditSelector, select_edit, select_testsets, testset_names, affected_testsets, read_map,
+    refresh_map, runner_arguments, retest_pattern, Selection, CoverageMap
 
 # ---------------------------------------------------------------------------------------
 # Items: the top-level definitions of a Julia file
@@ -621,11 +621,28 @@ function file_changes(
         return tracked
     end
     listing = git(root, "ls-files", "--others", "--exclude-standard")
-    untracked = [
-        untracked_change(root, path)
-            for path in split(listing, '\n'; keepempty = false)
-    ]
-    return vcat(tracked, untracked)
+    paths = split(listing, '\n'; keepempty = false)
+    if isempty(paths)
+        return tracked
+    end
+    # A base can hold a file the index does not track (a commit of the whole working tree, or a
+    # file untracked since): git reports it deleted, but it is on disk, so compare the two texts.
+    held = Set(keys(tree_blobs(root, base)))
+    kept = [change for change in tracked if !(change.status == :deleted && change.path in held && change.path in paths)]
+    untracked = FileChange[]
+    for path in paths
+        if !(path in held)
+            push!(untracked, untracked_change(root, path))
+            continue
+        end
+        old = git(root, "show", string(base, ":", path))
+        new = read(joinpath(root, path), String)
+        if old != new
+            hunks = endswith(path, ".jl") ? text_hunks(root, old, new) : Hunk[]
+            push!(untracked, FileChange(String(path), :modified, hunks))
+        end
+    end
+    return vcat(kept, untracked)
 end
 
 "Blob hash of every file at `revision`, as `git ls-tree` reports it."
@@ -1594,18 +1611,18 @@ function select_deltas(
             if occursin(file, located.item.text)
     ]
     new_reasons = [
-        located.item.name => "new testset, not in the map"
+        located.item.name => NEW_TESTSET_REASON
             for located in new_testsets
             if !haskey(map.testsets, located.item.name)
     ]
     static_names = context.static_names
     static_reasons = [
-        located.item.name => "static analysis: reads or analyses code, a .jl file changed"
+        located.item.name => STATIC_ANALYSIS_REASON
             for located in new_testsets
             if any_jl &&
             (static_item(located.item) || !isdisjoint(located.item.mentions, static_names))
     ]
-    weak_reasons = [name => "map status is " * entry.status for (name, entry) in map.testsets if any_jl && entry.status != "ok"]
+    weak_reasons = [name => PARTIAL_COVERAGE_REASON * entry.status for (name, entry) in map.testsets if any_jl && entry.status != "ok"]
 
     every = vcat(
         run_reasons,
@@ -1664,6 +1681,28 @@ function runner_arguments(by_path::Bool, names::AbstractVector{<:AbstractString}
         return String[names...]
     end
     return [retest_pattern(names)]
+end
+
+const NEW_TESTSET_REASON = "new testset, not in the map"
+const STATIC_ANALYSIS_REASON = "static analysis: reads or analyses code, a .jl file changed"
+const PARTIAL_COVERAGE_REASON = "map status is "
+
+"""
+    affected_testsets(selection)
+
+The testsets a selection selects because the change reaches them, sorted: without those it
+selects whatever changed (a static-analysis testset for any `.jl` change, one whose map
+coverage is partial) or because the map lacks them. A testset under such a rule that the
+change also reaches by another (it runs changed code, its code was edited) is kept.
+"""
+function affected_testsets(selection::Selection)::Vector{String}
+    blind = (NEW_TESTSET_REASON, STATIC_ANALYSIS_REASON, PARTIAL_COVERAGE_REASON)
+    return sort(
+        unique(
+            name for (name, reason) in selection.reasons
+                if !any(startswith(reason, rule) for rule in blind)
+        )
+    )
 end
 
 "The names of the testsets a selection selects, sorted."
@@ -2044,6 +2083,8 @@ function build_map(
         shards::Integer,
         commit::AbstractString,
         environment::AbstractVector{Pair{String, String}},
+        names::Union{Nothing, AbstractVector{<:AbstractString}} = nothing,
+        carried::AbstractDict{String, TestsetCoverage} = Dict{String, TestsetCoverage}(),
     )::Nothing
     tests_dir = isempty(suites) ? dirname(tests) : suites
     uncommitted = [
@@ -2095,13 +2136,19 @@ function build_map(
         )
             for name in unique([entry.item.name for entry in testsets])
     )
+    chosen = names
     names = first.(sort(collect(spans); by = last))
-    names = [
-        name
-            for name in names
-            if isempty(only) || any(occursin(part, name) for part in only)
-    ][shard:shards:end]
-    if isempty(names)
+    if chosen !== nothing
+        # A refresh names exactly the testsets to run, smallest first like a build.
+        names = [name for name in names if name in chosen]
+    else
+        names = [
+            name
+                for name in names
+                if isempty(only) || any(occursin(part, name) for part in only)
+        ][shard:shards:end]
+    end
+    if isempty(names) && chosen === nothing
         error(
             "no testset matches --only ",
             join(only, ", "),
@@ -2137,10 +2184,27 @@ function build_map(
         environment,
         line_spans,
     )
-    results = vcat(
-        [worker(first(names))],
-        asyncmap(worker, reverse(names[2:end]); ntasks = jobs),
-    )
+    results = Pair{String, Dict{String, Any}}[]
+    if !isempty(names)
+        results = vcat(
+            [worker(first(names))],
+            asyncmap(worker, reverse(names[2:end]); ntasks = jobs),
+        )
+    end
+    carried_entries = [
+        name => Dict{String, Any}(
+            "status" => entry.status,
+            "ms" => entry.ms,
+            "functions" => Dict{String, Any}(
+                file => ranges_text(
+                    [position for (position, header) in enumerate(definitions[file]) if header in headers]
+                )
+                    for (file, headers) in entry.functions
+                    if haskey(definitions, file) && any(in(headers), definitions[file])
+            ),
+        )
+            for (name, entry) in carried
+    ]
     document = Dict{String, Any}(
         "meta" => Dict{String, Any}(
             "commit" => commit,
@@ -2154,7 +2218,7 @@ function build_map(
             "sources" => String[sources...],
         ),
         "definitions" => definitions,
-        "testsets" => Dict{String, Any}(results),
+        "testsets" => Dict{String, Any}(vcat(results, carried_entries)),
     )
     buffer = IOBuffer()
     TOML.print(buffer, document; sorted = true)
@@ -2178,6 +2242,102 @@ function build_map(
         println(stderr, "[Fallout]   ", status, "  ", name)
     end
     return nothing
+end
+
+"""
+    refresh_map(root, commit; map = "test-impact-map.toml", jobs, timeout = 3600, environment = [])
+
+Bring the map up to the working tree, recorded at `commit`, a commit whose tree is the working
+tree (one made through a throwaway index, say), and return the testsets it ran.
+
+A coverage map keeps the coverage of every testset the change from the map's commit to the
+working tree does not reach (`affected_testsets`), and runs the others, and any testset the
+map lacks, under coverage as `build` does: a testset that runs no changed code executes what it
+did. A change to `Project.toml` or `Manifest.toml`, or a map commit git no longer has, runs every
+testset. A static map is rebuilt at `commit` with its recorded options; its cache re-infers only
+what changed. An absent map is built statically. Nothing happens when the map's commit already
+holds the working tree. `environment` is what `build --env` sets for each testset process.
+"""
+function refresh_map(
+        root::AbstractString,
+        commit::AbstractString;
+        map::AbstractString = DEFAULT_MAP,
+        jobs::Integer = max(1, Sys.CPU_THREADS),
+        timeout::Integer = 3600,
+        environment::AbstractVector{Pair{String, String}} = Pair{String, String}[],
+    )::Vector{String}
+    root = abspath(root)
+    map_path = abspath(root, map)
+    if !isfile(map_path)
+        StaticMap.build_at_commit(root, commit, map_path, String[])
+        return sort(collect(keys(read_map(map_path).testsets)))
+    end
+    meta = TOML.parsefile(map_path)["meta"]
+    old_commit = String(meta["commit"])
+    if commit_exists(root, old_commit) && !code_changed(root, old_commit, meta)
+        return String[]
+    end
+    if haskey(meta, "static")
+        StaticMap.build_at_commit(root, commit, map_path, StaticMap.rebuild_options(root, meta))
+        return sort(collect(keys(read_map(map_path).testsets)))
+    end
+    old = read_map(map_path)
+    tests = test_items(Snapshot(root, ""), old.tests, old.suites, old.suite_pattern)
+    current = Set(located.item.name for located in tests if located.item.kind == :testset)
+    reached = current
+    if commit_exists(root, old.commit)
+        selection = select_testsets(root, old, old.commit, "")
+        if isempty(selection.full)
+            reached = Set(affected_testsets(selection))
+        end
+    end
+    run = sort(collect(intersect(union(reached, setdiff(current, keys(old.testsets))), current)))
+    carried = Dict(
+        name => entry
+            for (name, entry) in old.testsets
+            if name in current && !(name in run)
+    )
+    build_map(
+        root,
+        map_path;
+        tests = old.tests,
+        suites = old.suites,
+        suite_pattern = old.suite_pattern,
+        sources = old.sources,
+        runner = old.runner,
+        project = old.project,
+        jobs = jobs,
+        timeout = timeout,
+        only = String[],
+        shard = 1,
+        shards = 1,
+        commit = commit,
+        environment = environment,
+        names = run,
+        carried = carried,
+    )
+    return run
+end
+
+"Whether `root`'s repository holds `commit`."
+commit_exists(root::AbstractString, commit::AbstractString)::Bool = success(
+    pipeline(`git -C $root cat-file -e $(commit * "^{commit}")`; stdout = devnull, stderr = devnull)
+)
+
+"""
+Whether a `.jl` file, an environment file, or a file under the tests directory differs between
+commit `base` and the working tree: what a map built at `base` (with `meta`) depends on.
+"""
+function code_changed(root::AbstractString, base::AbstractString, meta::AbstractDict)::Bool
+    sources = String[meta["sources"]...]
+    project = String(get(meta, "project", "."))
+    suites = String(get(meta, "suites", ""))
+    tests_dir = isempty(suites) ? dirname(String(meta["tests"])) : suites
+    return any(
+        endswith(change.path, ".jl") || dependency_file(change.path, sources, project) ||
+            startswith(change.path, tests_dir * "/")
+            for change in file_changes(root, base, "")
+    )
 end
 
 """

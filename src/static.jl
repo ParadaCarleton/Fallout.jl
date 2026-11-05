@@ -767,6 +767,12 @@ function ensure_map(
     if !haskey(meta, "static") || get(meta, "builder_fingerprint", "") == builder_fingerprint()
         return nothing
     end
+    build_at_commit(root, String(meta["commit"]), map_path, vcat(rebuild_options(root, meta), String[args...]))
+    return nothing
+end
+
+"The `build` arguments that rebuild a static map with the options recorded in its `meta`."
+function rebuild_options(root::AbstractString, meta::AbstractDict)::Vector{String}
     sources = collect(String, Iterators.flatten((["--source", String(source)] for source in meta["sources"])))
     macros = collect(String, Iterators.flatten((["--extra-testset-macro", String(name)] for name in get(meta, "extra_testset_macros", String[]))))
     cache_option = String(get(meta, "cache", joinpath(root, ".scratch", "static-map-cache")))
@@ -781,8 +787,7 @@ function ensure_map(
         "--test-module", String(get(meta, "test_module", "StaticMapTests")),
         "--cache", cache_option,
     ]
-    build_at_commit(root, String(meta["commit"]), map_path, vcat(settings, sources, macros, String[args...]))
-    return nothing
+    return vcat(settings, sources, macros)
 end
 
 end # module StaticMap

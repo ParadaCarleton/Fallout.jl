@@ -183,12 +183,26 @@ names = Fallout.testset_names(selection)                               # sorted 
 arguments = Fallout.runner_arguments(!isempty(selector.map.suites), names)
 ```
 
+A map describes its commit, so a long session of edits drifts away from it. To keep it
+current, record the working tree as a commit (through a throwaway index, so no ref or index
+changes) and refresh the map to it before selecting:
+
+```julia
+ran = Fallout.refresh_map(root, snapshot; map = "test-impact-map.toml")
+```
+
+A coverage map re-runs, under coverage, only the testsets the change since its commit reaches
+(`Fallout.affected_testsets`) and the testsets it lacks, and keeps the rest. A static map is
+rebuilt at the snapshot, and its cache re-infers only what changed. Nothing runs when no code
+changed. Gremlins refreshes the map this way before every run.
+
 `select_edit` takes the same path as `select` for the same change on disk: git diffs the two
 texts with the same flags, and the same item delta, context builder and rules follow. Like `select`, it trusts the map's coverage, which describes the map's
 commit. [Gremlins.jl](https://github.com/ParadaCarleton/Gremlins.jl) uses it to run each
 mutant against only the testsets that can detect it. The public names (`public`, not
 exported) are `EditSelector`, `select_edit`, `select_testsets`, `testset_names`,
-`read_map`, `runner_arguments`, `retest_pattern`, `Selection` and `CoverageMap`.
+`affected_testsets`, `refresh_map`, `read_map`, `runner_arguments`, `retest_pattern`,
+`Selection` and `CoverageMap`.
 
 ## What a map knows
 
