@@ -766,7 +766,7 @@ end
 "A commit holding the working tree of `root`, untracked files included, made through a throwaway index."
 function snapshot_commit(root::AbstractString)::String
     index = tempname()
-    try
+    return try
         environment = ("GIT_INDEX_FILE" => index,)
         withenv(environment...) do
             git_run(root, "read-tree", "HEAD")
