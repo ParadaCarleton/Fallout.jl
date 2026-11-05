@@ -24,6 +24,8 @@ import Base.JuliaSyntax as JS
 using Base.JuliaSyntax: @K_str
 
 export main, unit, unit_cache, UnitCache
+public EditSelector, select_edit, select_testsets, testset_names, read_map,
+    runner_arguments, retest_pattern, Selection, CoverageMap
 
 # ---------------------------------------------------------------------------------------
 # Items: the top-level definitions of a Julia file
@@ -978,7 +980,22 @@ function file_delta(
     )::Delta
     old_items = items_at(old_snapshot, change.path, change.status != :added)
     new_items = items_at(new_snapshot, change.path, change.status != :deleted)
-    hunks = [hunk for hunk in change.hunks if !ignorable(hunk, old_items, new_items)]
+    return items_delta(change.path, old_items, new_items, change.hunks)
+end
+
+"""
+    items_delta(path, old_items, new_items, hunks)
+
+The delta of file `path` whose items are `old_items` before and `new_items` after `hunks`:
+the items touched by the hunks that change more than blanks, comments and docstrings.
+"""
+function items_delta(
+        path::AbstractString,
+        old_items::AbstractVector{Item},
+        new_items::AbstractVector{Item},
+        hunks::AbstractVector{Hunk},
+    )::Delta
+    hunks = [hunk for hunk in hunks if !ignorable(hunk, old_items, new_items)]
     old_hit = unique(
         item_start,
         collect(Item, Iterators.flatten((items_hit_old(old_items, hunk) for hunk in hunks))),
@@ -987,7 +1004,7 @@ function file_delta(
         item_start,
         collect(Item, Iterators.flatten((items_hit_new(new_items, hunk) for hunk in hunks))),
     )
-    return Delta(change.path, old_hit, new_hit)
+    return Delta(String(path), old_hit, new_hit)
 end
 
 function headers(items::AbstractVector{Item}, name::AbstractString)::Vector{String}
@@ -1270,7 +1287,78 @@ function select_testsets(
             if class == :test
     ]
     any_jl = any(endswith(change.path, ".jl") for change in changes)
+    fixtures = [
+        basename(change.path)
+            for (change, class) in zip(changes, classes)
+            if class == :fixture
+    ]
+    old_sources = collect(
+        Located, Iterators.flatten(
+            (
+                [Located(path, item) for item in items_at(old_snapshot, path, true)]
+                    for path in source_files(root, base, map.sources)
+            )
+        )
+    )
+    suites = Dict{String, Set{String}}()
+    if !isempty(map.suites)
+        suites = suite_files(new_snapshot, map.suites, map.suite_pattern)
+    end
+    context = SelectionContext(map, old_sources, new_tests, suites, runnable)
+    return select_deltas(context, source_deltas, test_deltas, fixtures, any_jl)
+end
 
+"""
+What a selection reads besides the change: the map, the source items of the old tree, the test
+items of the new tree, each suite's files (with `suites`), and the testsets that can run.
+`test_binders` and `static_names` follow from the test items.
+"""
+struct SelectionContext
+    map::CoverageMap
+    old_sources::Vector{Located}
+    new_tests::Vector{Located}
+    suite_files::Dict{String, Set{String}}
+    runnable::Set{String}
+    test_binders::Vector{Located}
+    static_names::Set{String}
+end
+
+function SelectionContext(
+        map::CoverageMap,
+        old_sources::Vector{Located},
+        new_tests::Vector{Located},
+        suite_files::Dict{String, Set{String}},
+        runnable::Set{String},
+    )::SelectionContext
+    test_binders = [
+        located
+            for located in new_tests
+            if located.item.kind in (:function, :binding, :other)
+    ]
+    static_names = static_closure(copy(STATIC_MARKERS), test_binders)
+    return SelectionContext(
+        map, old_sources, new_tests, suite_files, runnable, test_binders, static_names,
+    )
+end
+
+"""
+    select_deltas(context, source_deltas, test_deltas, fixtures, any_jl)
+
+The selection for a change that is not a full-suite one, given its source and test deltas, the
+names of the fixture files it changes, and whether it changes any `.jl` file. The rules are
+those of `select_testsets`.
+"""
+function select_deltas(
+        context::SelectionContext,
+        source_deltas::AbstractVector{Delta},
+        test_deltas::AbstractVector{Delta},
+        fixtures::AbstractVector{<:AbstractString},
+        any_jl::Bool,
+    )::Selection
+    map = context.map
+    old_sources = context.old_sources
+    new_tests = context.new_tests
+    runnable = context.runnable
     changed = collect(
         Located, Iterators.flatten(
             (
@@ -1333,14 +1421,6 @@ function select_testsets(
             if isempty(covering(map, located.path, located.item))
     ]
 
-    old_sources = collect(
-        Located, Iterators.flatten(
-            (
-                [Located(path, item) for item in items_at(old_snapshot, path, true)]
-                    for path in source_files(root, base, map.sources)
-            )
-        )
-    )
     widened = unique(
         vcat(
             collect(String, Iterators.flatten((widened_names(delta) for delta in source_deltas))),
@@ -1398,7 +1478,7 @@ function select_testsets(
     ]
     if !isempty(map.suites)
         # A suite is its whole file and the files it includes: a code change in any edits it.
-        files = suite_files(new_snapshot, map.suites, map.suite_pattern)
+        files = context.suite_files
         append!(
             edited,
             [
@@ -1425,16 +1505,7 @@ function select_testsets(
             )
         )
     )
-    fixtures = [
-        basename(change.path)
-            for (change, class) in zip(changes, classes)
-            if class == :fixture
-    ]
-    test_binders = [
-        located
-            for located in new_tests
-            if located.item.kind in (:function, :binding, :other)
-    ]
+    test_binders = context.test_binders
     fixture_seeds = Set(
         collect(
             String, Iterators.flatten(
@@ -1492,7 +1563,7 @@ function select_testsets(
             for located in new_testsets
             if !haskey(map.testsets, located.item.name)
     ]
-    static_names = static_closure(copy(STATIC_MARKERS), test_binders)
+    static_names = context.static_names
     static_reasons = [
         located.item.name => "static analysis: reads or analyses code, a .jl file changed"
             for located in new_testsets
@@ -1558,6 +1629,142 @@ function runner_arguments(by_path::Bool, names::AbstractVector{<:AbstractString}
         return String[names...]
     end
     return [retest_pattern(names)]
+end
+
+"The names of the testsets a selection selects, sorted."
+testset_names(selection::Selection)::Vector{String} = sort(unique(first.(selection.reasons)))
+
+# ---------------------------------------------------------------------------------------
+# Edit selection: one in-memory edit of the working tree at a time
+# ---------------------------------------------------------------------------------------
+
+"""
+    EditSelector(root; map = "test-impact-map.toml", build = true)
+
+Selects the map's testsets for in-memory edits of the working tree's source files, one edit
+at a time, as a mutation tester makes them: `select_edit(selector, path, text)` is the
+selection `select` would make if the working tree differed from now only in `path` holding
+`text`. The working tree's sources and tests are parsed once, here, so an edit costs the
+parse of the one file it changes.
+
+`map` is relative to `root`. With `build`, an absent map is built statically at `HEAD`, as
+`select` builds one. The map's coverage describes its commit: a testset that the change from
+that commit to the working tree selects may run code the map does not show it running.
+"""
+struct EditSelector
+    root::String
+    map::CoverageMap
+    context::SelectionContext
+    texts::Dict{String, String}
+    items::Dict{String, Vector{Item}}
+end
+
+function EditSelector(
+        root::AbstractString;
+        map::AbstractString = DEFAULT_MAP,
+        build::Bool = true,
+    )::EditSelector
+    root = abspath(root)
+    map_path = abspath(root, map)
+    if build
+        StaticMap.ensure_map(root, map_path, String[])
+    end
+    coverage = read_map(map_path)
+    tree = Snapshot(root, "")
+    paths = working_source_files(root, coverage.sources)
+    texts = Dict(path => read_file(tree, path) for path in paths)
+    items = Dict(path => source_items(texts[path], path) for path in paths)
+    sources = [Located(path, item) for path in paths for item in items[path]]
+    tests = test_items(tree, coverage.tests, coverage.suites, coverage.suite_pattern)
+    runnable = Set(located.item.name for located in tests if located.item.kind == :testset)
+    suites = Dict{String, Set{String}}()
+    if !isempty(coverage.suites)
+        suites = suite_files(tree, coverage.suites, coverage.suite_pattern)
+    end
+    context = SelectionContext(coverage, sources, tests, suites, runnable)
+    return EditSelector(root, coverage, context, texts, items)
+end
+
+"The testsets an edit selector can select: those of the working tree's tests, sorted."
+testset_names(selector::EditSelector)::Vector{String} = sort(collect(selector.context.runnable))
+
+"The `.jl` files under the `sources` directories of the working tree, untracked ones included."
+function working_source_files(
+        root::AbstractString,
+        sources::AbstractVector{<:AbstractString},
+    )::Vector{String}
+    listing = git(root, "ls-files", "--cached", "--others", "--exclude-standard", "--", sources...)
+    return sort(
+        unique(
+            String(path)
+                for path in split(listing, '\n'; keepempty = false)
+                if endswith(path, ".jl") && isfile(joinpath(root, path)) &&
+                any(startswith(path, string(dir, "/")) for dir in sources)
+        )
+    )
+end
+
+"""
+    select_edit(selector, path, text)
+
+The selection for the edit that makes source file `path` (relative to the root, `/`-separated)
+hold `text`, everything else as the selector found it. A `text` that does not parse raises an
+error, as a file that does not parse stops `select`.
+"""
+function select_edit(
+        selector::EditSelector,
+        path::AbstractString,
+        text::AbstractString,
+    )::Selection
+    path = path_option(path)
+    if !haskey(selector.texts, path)
+        error(path, " is not a source file of the map (sources: ", join(selector.map.sources, ", "), ")")
+    end
+    original = selector.texts[path]
+    delta = items_delta(
+        path,
+        selector.items[path],
+        source_items(text, path),
+        edit_hunks(original, text),
+    )
+    return select_deltas(selector.context, [delta], Delta[], String[], text != original)
+end
+
+"""
+    edit_hunks(old, new)
+
+The hunks of a `-U0` diff from text `old` to text `new`: none when they are equal, else one
+spanning the lines between their common leading and trailing lines.
+"""
+function edit_hunks(old::AbstractString, new::AbstractString)::Vector{Hunk}
+    old_lines = split(old, '\n')
+    new_lines = split(new, '\n')
+    shortest = min(length(old_lines), length(new_lines))
+    leading = 0
+    while leading < shortest && old_lines[leading + 1] == new_lines[leading + 1]
+        leading += 1
+    end
+    trailing = 0
+    while trailing < shortest - leading &&
+            old_lines[end - trailing] == new_lines[end - trailing]
+        trailing += 1
+    end
+    removed = String.(old_lines[(leading + 1):(end - trailing)])
+    added = String.(new_lines[(leading + 1):(end - trailing)])
+    if isempty(removed) && isempty(added)
+        return Hunk[]
+    end
+    # Like git, a hunk of no lines starts at the line before the gap.
+    return [
+        Hunk(
+            isempty(removed) ? leading : leading + 1,
+            length(removed),
+            isempty(added) ? leading : leading + 1,
+            length(added),
+            removed,
+            added,
+        ),
+    ]
 end
 
 function report(

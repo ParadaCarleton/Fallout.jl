@@ -217,6 +217,48 @@ names_in(selection::Fallout.Selection)::Vector{String} = sort(
     @test names_in(operator) == ["helper user", "runs f", "runs g", "uses S"]
 end
 
+@testset "an in-memory edit selects what the same edit on disk selects" begin
+    root = mktempdir()
+    fixture(root)
+    selector = Fallout.EditSelector(root; map = "map.toml", build = false)
+    edits = [
+        "x + 1" => "x + 2",
+        "x + 1" => "x - 1",
+        "\"A thing.\"" => "\"Another thing.\"",
+        "f(x) = x + 1" => "f(x) = x + 1 # note",
+        "a::Int" => "a::Float32",
+        "function g(x::Int)" => "function g(x::Integer)",
+        "unused(x) = x" => "unused(x) = 2x",
+        "return 2x" => "return\n2x",
+        "return 2x" => "return nothing",
+        "    return 2x\n" => "",
+        "    return 2x" => "\n    return 2x",
+        "h(s::S) = s.a\n" => "",
+        "unused(x) = x" => "unused(x) = x\nBase.:(==)(a::S, b::S) = true",
+        "unused(x) = x" => "unused(x) = x\nnewfunction(y) = y",
+    ]
+    for (old, new) in edits
+        edited = replace(PACKAGE, old => new)
+        on_disk = selected_after(root, "src/P.jl", old, new)
+        in_memory = Fallout.select_edit(selector, "src/P.jl", edited)
+        @test (old => names_in(in_memory)) == (old => names_in(on_disk))
+        @test in_memory.uncovered == on_disk.uncovered
+        @test in_memory.lacking == on_disk.lacking
+        @test Fallout.testset_names(in_memory) == names_in(in_memory)
+    end
+    @test isempty(Fallout.select_edit(selector, "src/P.jl", PACKAGE).reasons)
+    @test Fallout.testset_names(selector) == ["helper user", "runs f", "runs g", "uses S"]
+    @test_throws "cannot parse" Fallout.select_edit(selector, "src/P.jl", replace(PACKAGE, "x + 1" => "x + )"))
+    @test_throws "not a source file" Fallout.select_edit(selector, "test/runtests.jl", TESTS)
+
+    @test Fallout.edit_hunks("a\nb\nc\n", "a\nb\nc\n") == Fallout.Hunk[]
+    insertion = only(Fallout.edit_hunks("a\nc\n", "a\nb\nc\n"))
+    @test (insertion.old_first, insertion.old_count, insertion.new_first, insertion.new_count) == (1, 0, 2, 1)
+    deletion = only(Fallout.edit_hunks("a\nb\nc\n", "a\nc\n"))
+    @test (deletion.old_first, deletion.old_count, deletion.new_first, deletion.new_count) == (2, 1, 1, 0)
+    @test deletion.removed == ["b"]
+end
+
 @testset "an import changes the names it stops importing, not the ones it starts importing" begin
     root = mktempdir()
     commit = fixture(root)

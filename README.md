@@ -169,6 +169,27 @@ by a regex for the runner.
   and lists them. Those are selected by name only (see "What a map knows"). As the map
   ages, the diff from its commit grows and selects more. The count says when to rebuild.
 
+## One edit at a time (mutation testing)
+
+A mutation tester makes thousands of small edits and wants each one's testsets. `select`
+diffs git trees and parses every file on each call; `EditSelector` parses the working tree
+once and then selects for one in-memory edit of a source file at a time:
+
+```julia
+using Fallout
+selector = Fallout.EditSelector(root; map = "test-impact-map.toml")   # builds an absent map, as `select` does
+selection = Fallout.select_edit(selector, "src/P.jl", edited_text)     # as if src/P.jl held edited_text
+names = Fallout.testset_names(selection)                               # sorted testset names
+arguments = Fallout.runner_arguments(!isempty(selector.map.suites), names)
+```
+
+`select_edit` applies the rules `select` applies to the same change on disk, and gives the
+same selection. Like `select`, it trusts the map's coverage, which describes the map's
+commit. [Gremlins.jl](https://github.com/ParadaCarleton/Gremlins.jl) uses it to run each
+mutant against only the testsets that can detect it. The public names (`public`, not
+exported) are `EditSelector`, `select_edit`, `select_testsets`, `testset_names`,
+`read_map`, `runner_arguments`, `retest_pattern`, `Selection` and `CoverageMap`.
+
 ## What a map knows
 
 Coverage is keyed by definition, not by line. The map lists each source file's functions
