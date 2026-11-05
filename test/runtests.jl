@@ -253,7 +253,7 @@ end
 
     # The hunks come from git, as `select`'s do.
     @test Fallout.text_hunks(root, "a\nb\nc\n", "a\nb\nc\n") == Fallout.Hunk[]
-    # Text git takes for binary differs, yet has no hunks to place.
+    # Text git takes for binary differs, yet has no lines to place.
     @test Fallout.text_hunks(root, "a\0b\n", "a\0c\n") == Fallout.Hunk[]
     insertion = only(Fallout.text_hunks(root, "a\nc\n", "a\nb\nc\n"))
     @test (insertion.old_first, insertion.old_count, insertion.new_first, insertion.new_count) == (1, 0, 2, 1)

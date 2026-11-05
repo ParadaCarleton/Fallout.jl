@@ -1810,10 +1810,8 @@ function text_hunks(root::AbstractString, old::AbstractString, new::AbstractStri
         command = ignorestatus(`git -C $root -c core.quotepath=off --no-pager diff --no-index $DIFF_FLAGS $old_path $new_path`)
         output = read(command, String)
         changes = parse_diff(output)
-        if isempty(changes)
-            return Hunk[]
-        end
-        return only(changes).hunks
+        # Different texts always give a header, but keep an empty parse harmless.
+        return isempty(changes) ? Hunk[] : only(changes).hunks
     end
 end
 
