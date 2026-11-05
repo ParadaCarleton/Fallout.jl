@@ -251,12 +251,15 @@ end
     @test_throws "cannot parse" Fallout.select_edit(selector, "src/P.jl", replace(PACKAGE, "x + 1" => "x + )"))
     @test_throws "not a source file" Fallout.select_edit(selector, "test/runtests.jl", TESTS)
 
-    @test Fallout.edit_hunks("a\nb\nc\n", "a\nb\nc\n") == Fallout.Hunk[]
-    insertion = only(Fallout.edit_hunks("a\nc\n", "a\nb\nc\n"))
+    # The hunks come from git, as `select`'s do.
+    @test Fallout.text_hunks(root, "a\nb\nc\n", "a\nb\nc\n") == Fallout.Hunk[]
+    insertion = only(Fallout.text_hunks(root, "a\nc\n", "a\nb\nc\n"))
     @test (insertion.old_first, insertion.old_count, insertion.new_first, insertion.new_count) == (1, 0, 2, 1)
-    deletion = only(Fallout.edit_hunks("a\nb\nc\n", "a\nc\n"))
+    deletion = only(Fallout.text_hunks(root, "a\nb\nc\n", "a\nc\n"))
     @test (deletion.old_first, deletion.old_count, deletion.new_first, deletion.new_count) == (2, 1, 1, 0)
     @test deletion.removed == ["b"]
+    two = Fallout.text_hunks(root, "a\nb\nc\nd\ne\n", "A\nb\nc\nd\nE\n")
+    @test [(hunk.old_first, hunk.new_first) for hunk in two] == [(1, 1), (5, 5)]
 end
 
 @testset "an import changes the names it stops importing, not the ones it starts importing" begin

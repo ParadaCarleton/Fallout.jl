@@ -183,8 +183,8 @@ names = Fallout.testset_names(selection)                               # sorted 
 arguments = Fallout.runner_arguments(!isempty(selector.map.suites), names)
 ```
 
-`select_edit` applies the rules `select` applies to the same change on disk, and gives the
-same selection. Like `select`, it trusts the map's coverage, which describes the map's
+`select_edit` takes the same path as `select` for the same change on disk: git diffs the two
+texts with the same flags, and the same item delta, context builder and rules follow. Like `select`, it trusts the map's coverage, which describes the map's
 commit. [Gremlins.jl](https://github.com/ParadaCarleton/Gremlins.jl) uses it to run each
 mutant against only the testsets that can detect it. The public names (`public`, not
 exported) are `EditSelector`, `select_edit`, `select_testsets`, `testset_names`,

@@ -600,6 +600,9 @@ function untracked_change(root::AbstractString, path::AbstractString)::FileChang
     return FileChange(String(path), :added, Hunk[])
 end
 
+"The flags of every diff the selector reads: the hunks of a change come from git, one way."
+const DIFF_FLAGS = ("--no-renames", "--no-color", "--no-ext-diff", "-U0")
+
 """
     file_changes(root, base, target)
 
@@ -613,18 +616,7 @@ function file_changes(
         target::AbstractString,
     )::Vector{FileChange}
     revisions = filter(!isempty, [String(base), String(target)])
-    tracked = parse_diff(
-        git(
-            root,
-            "diff",
-            "--no-renames",
-            "--no-color",
-            "--no-ext-diff",
-            "-U0",
-            revisions...,
-            "--",
-        )
-    )
+    tracked = parse_diff(git(root, "diff", DIFF_FLAGS..., revisions..., "--"))
     if !isempty(target)
         return tracked
     end
@@ -1292,20 +1284,62 @@ function select_testsets(
             for (change, class) in zip(changes, classes)
             if class == :fixture
     ]
+    context = selection_context(map, old_snapshot, new_snapshot, new_tests)
+    return select_deltas(context, source_deltas, test_deltas, fixtures, any_jl)
+end
+
+"""
+    selection_context(map, old_snapshot, new_snapshot, new_tests)
+
+The context of a selection from `old_snapshot` to `new_snapshot`, whose test items are
+`new_tests`: the source items of the old tree, and each suite's files in the new one.
+`select_testsets` and `EditSelector` both build theirs here.
+"""
+function selection_context(
+        map::CoverageMap,
+        old_snapshot::Snapshot,
+        new_snapshot::Snapshot,
+        new_tests::AbstractVector{Located},
+    )::SelectionContext
     old_sources = collect(
         Located, Iterators.flatten(
             (
                 [Located(path, item) for item in items_at(old_snapshot, path, true)]
-                    for path in source_files(root, base, map.sources)
+                    for path in snapshot_source_files(old_snapshot, map.sources)
             )
         )
     )
+    runnable = Set(located.item.name for located in new_tests if located.item.kind == :testset)
     suites = Dict{String, Set{String}}()
     if !isempty(map.suites)
         suites = suite_files(new_snapshot, map.suites, map.suite_pattern)
     end
-    context = SelectionContext(map, old_sources, new_tests, suites, runnable)
-    return select_deltas(context, source_deltas, test_deltas, fixtures, any_jl)
+    return SelectionContext(map, old_sources, new_tests, suites, runnable)
+end
+
+"""
+    snapshot_source_files(snapshot, sources)
+
+The `.jl` files under the `sources` directories of a snapshot: those git tracks at its
+revision, or for the working tree those it tracks or could (untracked, not ignored) and
+that exist.
+"""
+function snapshot_source_files(
+        snapshot::Snapshot,
+        sources::AbstractVector{<:AbstractString},
+    )::Vector{String}
+    if !isempty(snapshot.revision)
+        return source_files(snapshot.root, snapshot.revision, sources)
+    end
+    listing = git(snapshot.root, "ls-files", "--cached", "--others", "--exclude-standard", "--", sources...)
+    return sort(
+        unique(
+            String(path)
+                for path in split(listing, '\n'; keepempty = false)
+                if endswith(path, ".jl") && isfile(joinpath(snapshot.root, path)) &&
+                any(startswith(path, string(dir, "/")) for dir in sources)
+        )
+    )
 end
 
 """
@@ -1672,38 +1706,23 @@ function EditSelector(
     end
     coverage = read_map(map_path)
     tree = Snapshot(root, "")
-    paths = working_source_files(root, coverage.sources)
-    texts = Dict(path => read_file(tree, path) for path in paths)
-    items = Dict(path => source_items(texts[path], path) for path in paths)
-    sources = [Located(path, item) for path in paths for item in items[path]]
     tests = test_items(tree, coverage.tests, coverage.suites, coverage.suite_pattern)
-    runnable = Set(located.item.name for located in tests if located.item.kind == :testset)
-    suites = Dict{String, Set{String}}()
-    if !isempty(coverage.suites)
-        suites = suite_files(tree, coverage.suites, coverage.suite_pattern)
+    # The edits are made to the working tree, so it is both the old and the new tree.
+    context = selection_context(coverage, tree, tree, tests)
+    items = Dict{String, Vector{Item}}()
+    for located in context.old_sources
+        push!(get!(items, located.path, Item[]), located.item)
     end
-    context = SelectionContext(coverage, sources, tests, suites, runnable)
+    paths = snapshot_source_files(tree, coverage.sources)
+    texts = Dict(path => read_file(tree, path) for path in paths)
+    for path in paths
+        get!(items, path, Item[])
+    end
     return EditSelector(root, coverage, context, texts, items)
 end
 
 "The testsets an edit selector can select: those of the working tree's tests, sorted."
 testset_names(selector::EditSelector)::Vector{String} = sort(collect(selector.context.runnable))
-
-"The `.jl` files under the `sources` directories of the working tree, untracked ones included."
-function working_source_files(
-        root::AbstractString,
-        sources::AbstractVector{<:AbstractString},
-    )::Vector{String}
-    listing = git(root, "ls-files", "--cached", "--others", "--exclude-standard", "--", sources...)
-    return sort(
-        unique(
-            String(path)
-                for path in split(listing, '\n'; keepempty = false)
-                if endswith(path, ".jl") && isfile(joinpath(root, path)) &&
-                any(startswith(path, string(dir, "/")) for dir in sources)
-        )
-    )
-end
 
 """
     select_edit(selector, path, text)
@@ -1722,50 +1741,41 @@ function select_edit(
         error(path, " is not a source file of the map (sources: ", join(selector.map.sources, ", "), ")")
     end
     original = selector.texts[path]
+    # The hunks come from git, as `select`'s do, then pass through the same item delta.
     delta = items_delta(
         path,
         selector.items[path],
         source_items(text, path),
-        edit_hunks(original, text),
+        text_hunks(selector.root, original, text),
     )
     return select_deltas(selector.context, [delta], Delta[], String[], text != original)
 end
 
 """
-    edit_hunks(old, new)
+    text_hunks(root, old, new)
 
-The hunks of a `-U0` diff from text `old` to text `new`: none when they are equal, else one
-spanning the lines between their common leading and trailing lines.
+The hunks of the diff from text `old` to text `new`: git's, with the flags of every diff
+the selector reads (`git diff --no-index` on two temporary files, run in `root` so the
+repository's diff settings apply).
 """
-function edit_hunks(old::AbstractString, new::AbstractString)::Vector{Hunk}
-    old_lines = split(old, '\n')
-    new_lines = split(new, '\n')
-    shortest = min(length(old_lines), length(new_lines))
-    leading = 0
-    while leading < shortest && old_lines[leading + 1] == new_lines[leading + 1]
-        leading += 1
-    end
-    trailing = 0
-    while trailing < shortest - leading &&
-            old_lines[end - trailing] == new_lines[end - trailing]
-        trailing += 1
-    end
-    removed = String.(old_lines[(leading + 1):(end - trailing)])
-    added = String.(new_lines[(leading + 1):(end - trailing)])
-    if isempty(removed) && isempty(added)
+function text_hunks(root::AbstractString, old::AbstractString, new::AbstractString)::Vector{Hunk}
+    if old == new
         return Hunk[]
     end
-    # Like git, a hunk of no lines starts at the line before the gap.
-    return [
-        Hunk(
-            isempty(removed) ? leading : leading + 1,
-            length(removed),
-            isempty(added) ? leading : leading + 1,
-            length(added),
-            removed,
-            added,
-        ),
-    ]
+    return mktempdir() do dir
+        old_path = joinpath(dir, "old.jl")
+        new_path = joinpath(dir, "new.jl")
+        write(old_path, old)
+        write(new_path, new)
+        # `--no-index` exits 1 when the files differ.
+        command = ignorestatus(`git -C $root -c core.quotepath=off --no-pager diff --no-index $DIFF_FLAGS $old_path $new_path`)
+        output = read(command, String)
+        changes = parse_diff(output)
+        if isempty(changes)
+            return Hunk[]
+        end
+        return only(changes).hunks
+    end
 end
 
 function report(
