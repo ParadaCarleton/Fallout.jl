@@ -1325,10 +1325,10 @@ end
 
 function SelectionContext(
         map::CoverageMap,
-        old_sources::Vector{Located},
-        new_tests::Vector{Located},
-        suite_files::Dict{String, Set{String}},
-        runnable::Set{String},
+        old_sources::AbstractVector{Located},
+        new_tests::AbstractVector{Located},
+        suite_files::AbstractDict{String, Set{String}},
+        runnable::AbstractSet{String},
     )::SelectionContext
     test_binders = [
         located
@@ -1337,7 +1337,8 @@ function SelectionContext(
     ]
     static_names = static_closure(copy(STATIC_MARKERS), test_binders)
     return SelectionContext(
-        map, old_sources, new_tests, suite_files, runnable, test_binders, static_names,
+        map, collect(Located, old_sources), collect(Located, new_tests),
+        Dict{String, Set{String}}(suite_files), Set{String}(runnable), test_binders, static_names,
     )
 end
 
