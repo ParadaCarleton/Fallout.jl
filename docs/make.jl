@@ -16,7 +16,7 @@ makedocs(;
     format = Documenter.HTML(
         canonical = "https://paradacarleton.github.io/Fallout.jl/stable",
     ),
-    pages = ["Home" => "index.md", "Units" => "units.md", "API" => "api.md"],
+    pages = ["Home" => "index.md", "Units" => "units.md", "API" => "api.md", "Static map internals" => "static_api.md"],
     warnonly = false,
 )
 

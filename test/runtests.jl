@@ -217,6 +217,86 @@ names_in(selection::Fallout.Selection)::Vector{String} = sort(
     @test names_in(operator) == ["helper user", "runs f", "runs g", "uses S"]
 end
 
+@testset "an in-memory edit selects what the same edit on disk selects" begin
+    root = mktempdir()
+    fixture(root)
+    selector = Fallout.EditSelector(root; map = "map.toml", build = false)
+    edits = [
+        "x + 1" => "x + 2",
+        "x + 1" => "x - 1",
+        "\"A thing.\"" => "\"Another thing.\"",
+        "f(x) = x + 1" => "f(x) = x + 1 # note",
+        "a::Int" => "a::Float32",
+        "function g(x::Int)" => "function g(x::Integer)",
+        "unused(x) = x" => "unused(x) = 2x",
+        "return 2x" => "return\n2x",
+        "return 2x" => "return nothing",
+        "    return 2x\n" => "",
+        "    return 2x" => "\n    return 2x",
+        "h(s::S) = s.a\n" => "",
+        "unused(x) = x" => "unused(x) = x\nBase.:(==)(a::S, b::S) = true",
+        "unused(x) = x" => "unused(x) = x\nnewfunction(y) = y",
+        # A NUL byte in a string: git would call the file binary and give no hunks.
+        "x + 1" => "x + sizeof(\"\0\")",
+    ]
+    for (old, new) in edits
+        edited = replace(PACKAGE, old => new)
+        on_disk = selected_after(root, "src/P.jl", old, new)
+        in_memory = Fallout.select_edit(selector, "src/P.jl", edited)
+        @test (old => names_in(in_memory)) == (old => names_in(on_disk))
+        @test in_memory.uncovered == on_disk.uncovered
+        @test in_memory.lacking == on_disk.lacking
+        @test Fallout.testset_names(in_memory) == names_in(in_memory)
+    end
+    @test isempty(Fallout.select_edit(selector, "src/P.jl", PACKAGE).reasons)
+    @test Fallout.testset_names(selector) == ["helper user", "runs f", "runs g", "uses S"]
+    @test_throws "cannot parse" Fallout.select_edit(selector, "src/P.jl", replace(PACKAGE, "x + 1" => "x + )"))
+    @test_throws "not a source file" Fallout.select_edit(selector, "test/runtests.jl", TESTS)
+
+    # The hunks come from git, as `select`'s do.
+    @test Fallout.text_hunks(root, "a\nb\nc\n", "a\nb\nc\n") == Fallout.Hunk[]
+    # Text holding a NUL byte is still diffed as text.
+    nul = only(Fallout.text_hunks(root, "a\0b\n", "a\0c\n"))
+    @test (nul.old_first, nul.old_count, nul.new_first, nul.new_count) == (1, 1, 1, 1)
+    @test names_in(Fallout.select_edit(selector, "src/P.jl", replace(PACKAGE, "x + 1" => "x + sizeof(\"\0\")"))) == ["runs f"]
+    insertion = only(Fallout.text_hunks(root, "a\nc\n", "a\nb\nc\n"))
+    @test (insertion.old_first, insertion.old_count, insertion.new_first, insertion.new_count) == (1, 0, 2, 1)
+    deletion = only(Fallout.text_hunks(root, "a\nb\nc\n", "a\nc\n"))
+    @test (deletion.old_first, deletion.old_count, deletion.new_first, deletion.new_count) == (2, 1, 1, 0)
+    @test deletion.removed == ["b"]
+    two = Fallout.text_hunks(root, "a\nb\nc\nd\ne\n", "A\nb\nc\nd\nE\n")
+    @test [(hunk.old_first, hunk.new_first) for hunk in two] == [(1, 1), (5, 5)]
+end
+
+@testset "an edit to a tree that changed since the map's commit selects what select does" begin
+    root = mktempdir()
+    fixture(root)
+    # The working tree already changes f; the map's coverage is of its commit.
+    write_file(root, "src/P.jl", replace(PACKAGE, "x + 1" => "x + 2"))
+    selector = Fallout.EditSelector(root; map = "map.toml", build = false)
+    edited = replace(PACKAGE, "x + 1" => "x + 2", "return 2x" => "return 3x")
+    in_memory = Fallout.select_edit(selector, "src/P.jl", edited)
+    @test names_in(in_memory) == ["runs f", "runs g"]
+    on_disk = selected_after(root, "src/P.jl", "return 2x", "return 3x")
+    @test names_in(in_memory) == names_in(on_disk)
+    # Editing the file back to the map's commit leaves nothing changed.
+    @test isempty(Fallout.select_edit(selector, "src/P.jl", PACKAGE).reasons)
+    # An uncommitted change to a test is part of every edit's selection too.
+    write_file(root, "test/runtests.jl", replace(TESTS, "P.g(1) == 2" => "P.g(2) == 4"))
+    write_file(root, "src/P.jl", PACKAGE)
+    tested = Fallout.EditSelector(root; map = "map.toml", build = false)
+    @test names_in(Fallout.select_edit(tested, "src/P.jl", replace(PACKAGE, "x + 1" => "x + 2"))) ==
+        ["runs f", "runs g"]
+    # A map whose commit is gone cannot be compared with the working tree.
+    write_file(root, "gone.toml", replace(read(joinpath(root, "map.toml"), String), r"commit = \"[0-9a-f]+\"" => "commit = \"$("0"^40)\""))
+    @test_throws "not in the repository" Fallout.EditSelector(root; map = "gone.toml", build = false)
+    # An environment change runs the full suite, whatever the edit.
+    write_file(root, "Project.toml", "name = \"P\"\nversion = \"0.1.0\"\n")
+    full = Fallout.select_edit(Fallout.EditSelector(root; map = "map.toml", build = false), "src/P.jl", PACKAGE)
+    @test !isempty(full.full)
+    @test names_in(full) == ["helper user", "runs f", "runs g", "uses S"]
+end
+
 @testset "an import changes the names it stops importing, not the ones it starts importing" begin
     root = mktempdir()
     commit = fixture(root)
@@ -716,6 +796,95 @@ end
     @test_throws "is not a git checkout" Fallout.main(["select", "--root", joinpath(root, "src"), "--map", "../built.toml", "--base", "HEAD"])
     @test_throws "usage" Fallout.main(String[])
     @test_throws "needs a value" Fallout.main(["build", "--map"])
+end
+
+"A commit holding the working tree of `root`, untracked files included, made through a throwaway index."
+function snapshot_commit(root::AbstractString)::String
+    index = tempname()
+    return try
+        environment = ("GIT_INDEX_FILE" => index,)
+        withenv(environment...) do
+            git_run(root, "read-tree", "HEAD")
+            git_run(root, "add", "-A")
+            tree = strip(git_run(root, "write-tree"))
+            return String(strip(git_run(root, "commit-tree", tree, "-p", "HEAD", "-m", "snapshot")))
+        end
+    finally
+        rm(index; force = true)
+    end
+end
+
+@testset "a base that holds an untracked file compares its text" begin
+    root = mktempdir()
+    fixture(root)
+    write_file(root, "src/extra.jl", "extra(x) = x\n")
+    write_file(root, "src/P.jl", replace(PACKAGE, "unused(x) = x" => "unused(x) = x\ninclude(\"extra.jl\")"))
+    snapshot = snapshot_commit(root)
+    map = read_map(joinpath(root, "map.toml"))
+    # Unchanged since the snapshot: git calls the untracked file deleted, yet nothing changed.
+    @test isempty(Fallout.file_changes(root, snapshot, ""))
+    @test isempty(select_testsets(root, map, snapshot, "").reasons)
+    write_file(root, "src/extra.jl", "extra(x) = x + 1\n")
+    changes = Fallout.file_changes(root, snapshot, "")
+    @test [(change.path, change.status) for change in changes] == [("src/extra.jl", :modified)]
+    @test length(only(only(changes).hunks).added) == 1
+end
+
+@testset "affected testsets leave out the rules that fire for any change" begin
+    selection = Fallout.Selection(
+        [
+            "a" => "runs changed `f` (src/P.jl:1-1)",
+            "b" => Fallout.STATIC_ANALYSIS_REASON,
+            "c" => Fallout.PARTIAL_COVERAGE_REASON * "timeout",
+            "d" => Fallout.NEW_TESTSET_REASON,
+            "b" => "edited testset (test/runtests.jl:3-5)",
+        ],
+        String[], String[], String[], 0, String[],
+    )
+    @test Fallout.affected_testsets(selection) == ["a", "b"]
+    @test Fallout.testset_names(selection) == ["a", "b", "c", "d"]
+end
+
+@testset "refresh brings a coverage map up to the working tree" begin
+    root = mktempdir()
+    fixture(root)
+    write_file(root, "Project.toml", "name = \"P\"\nuuid = \"f0000000-0000-4000-8000-000000000001\"\n")
+    write_file(root, "test/retest.jl", RUNNER)
+    write_file(root, "test/slow.jl", "")
+    git_run(root, "add", "-A")
+    git_run(root, "commit", "-q", "-m", "runner")
+    Fallout.main(["build", "--root", root, "--runner", "test/retest.jl", "--map", "built.toml", "--jobs", "4"])
+    before = read_map(joinpath(root, "built.toml"))
+    @test before.testsets["runs g"].functions == Dict("src/P.jl" => Set(["g(x::Int)"]))
+
+    # An uncommitted edit: g now calls f. The map does not know "runs g" runs f.
+    write_file(root, "src/P.jl", replace(PACKAGE, "return 2x" => "return f(x) + x - 1"))
+    snapshot = snapshot_commit(root)
+    ran = Fallout.refresh_map(root, snapshot; map = "built.toml", jobs = 2)
+    @test ran == ["runs g"]
+    after = read_map(joinpath(root, "built.toml"))
+    @test after.commit == snapshot
+    @test after.testsets["runs g"].functions == Dict("src/P.jl" => Set(["f(x)", "g(x::Int)"]))
+    @test after.testsets["runs f"].functions == before.testsets["runs f"].functions
+    @test after.testsets["runs f"].ms == before.testsets["runs f"].ms
+    @test after.testsets["uses S"].functions == before.testsets["uses S"].functions
+    @test Set(keys(after.testsets)) == Set(keys(before.testsets))
+    # The refreshed map selects "runs g" for a change to f, which the old one could not.
+    write_file(root, "src/P.jl", replace(PACKAGE, "return 2x" => "return f(x) + x - 1", "x + 1" => "x + 2"))
+    refreshed = select_testsets(root, after, after.commit, "")
+    @test Fallout.affected_testsets(refreshed) == ["runs f", "runs g"]
+    @test ("runs g" => "runs changed `f` (src/P.jl:6-6)") in refreshed.reasons
+    write_file(root, "src/P.jl", replace(PACKAGE, "return 2x" => "return f(x) + x - 1"))
+    # A snapshot of the same tree leaves the map alone.
+    @test isempty(Fallout.refresh_map(root, snapshot_commit(root); map = "built.toml"))
+    @test read_map(joinpath(root, "built.toml")).commit == snapshot
+    # An ignored Manifest is in no commit, yet changes what the tests run against: every testset runs.
+    write_file(root, ".git/info/exclude", "Manifest.toml\n")
+    write_file(root, "Manifest.toml", "# an ignored environment\n")
+    same = snapshot_commit(root)
+    @test !Fallout.code_changed(root, snapshot, Fallout.TOML.parsefile(joinpath(root, "built.toml"))["meta"])
+    @test Fallout.refresh_map(root, same; map = "built.toml", jobs = 4) == sort(collect(keys(before.testsets)))
+    @test isempty(Fallout.refresh_map(root, same; map = "built.toml"))
 end
 
 """
