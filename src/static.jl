@@ -690,6 +690,19 @@ function load_path_separator(windows::Bool)::Char
     return ':'
 end
 
+"""
+    child_load_path(project_path, environments, fallout_root, separator)
+
+The `JULIA_LOAD_PATH` of a static build's process: the package project first, then the parent's
+`environments` (they hold Fallout's own dependencies when Fallout is installed from a registry or
+a URL, where `fallout_root` has no manifest), then `fallout_root` and the standard libraries.
+"""
+function child_load_path(
+        project_path::AbstractString, environments::AbstractVector{<:AbstractString}, fallout_root::AbstractString, separator::Char,
+    )::String
+    return join(unique(String[project_path; environments; fallout_root; "@stdlib"]), separator)
+end
+
 """Run a static build in the package project's environment."""
 function build_subprocess(args::AbstractVector{<:AbstractString})::Nothing
     root = abspath(option_value(args, "--root", pwd()))
@@ -697,7 +710,7 @@ function build_subprocess(args::AbstractVector{<:AbstractString})::Nothing
     project_path = abspath(root, project)
     separator = load_path_separator(Sys.iswindows())
     fallout_root = dirname(@__DIR__)
-    load_path = join((project_path, fallout_root, "@stdlib"), separator)
+    load_path = child_load_path(project_path, Base.load_path(), fallout_root, separator)
     script = joinpath(fallout_root, "bin", "fallout.jl")
     # The child runs in `root`, so a relative `--root` would be read against itself: the last value wins.
     arguments = vcat(String[args...], String["--root", root])
