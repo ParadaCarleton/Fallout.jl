@@ -600,8 +600,9 @@ function untracked_change(root::AbstractString, path::AbstractString)::FileChang
     return FileChange(String(path), :added, Hunk[])
 end
 
-"The flags of every diff the selector reads: the hunks of a change come from git, one way."
-const DIFF_FLAGS = ("--no-renames", "--no-color", "--no-ext-diff", "-U0")
+"The flags of every diff the selector reads: the hunks of a change come from git, one way, and
+a source file holding a NUL byte is still diffed as text."
+const DIFF_FLAGS = ("--text", "--no-renames", "--no-color", "--no-ext-diff", "-U0")
 
 """
     file_changes(root, base, target)
@@ -1173,6 +1174,35 @@ function full_suite_reasons(
 end
 
 """
+    environment_digest(root, sources, project)
+
+A digest of the environment files (`Project.toml`, `Manifest*.toml`) in the working tree of
+`root` where they decide the environment (the folders `dependency_file` names, and `test`),
+whether git tracks them or not: an ignored `Manifest.toml` changes what the tests run against
+without changing any commit.
+"""
+function environment_digest(
+        root::AbstractString,
+        sources::AbstractVector{<:AbstractString},
+        project::AbstractString,
+    )::String
+    folders = sort(unique(normpath.(vcat([".", String(project), "test"], [dirname(String(dir)) for dir in sources], String[sources...]))))
+    context = SHA.SHA256_CTX()
+    for folder in folders
+        directory = joinpath(root, folder)
+        isdir(directory) || continue
+        for name in sort(readdir(directory))
+            if name == "Project.toml" || (startswith(name, "Manifest") && endswith(name, ".toml"))
+                SHA.update!(context, codeunits(string(folder, '/', name, '\0')))
+                SHA.update!(context, read(joinpath(directory, name)))
+                SHA.update!(context, codeunits("\0"))
+            end
+        end
+    end
+    return bytes2hex(SHA.digest!(context))
+end
+
+"""
     dependency_file(path, sources, project)
 
 Whether `path` is a `Project.toml` or `Manifest*.toml` that decides the environment: in the
@@ -1242,6 +1272,36 @@ function select_testsets(
         base::AbstractString,
         target::AbstractString,
     )::Selection
+    set = change_set(root, map, base, target)
+    if !isempty(set.full)
+        return full_selection(set)
+    end
+    context = selection_context(map, set.old_snapshot, set.new_snapshot, set.new_tests)
+    return select_change_set(context, set)
+end
+
+"""
+The change from one tree to another as a selection reads it: the changed files, each with its
+class and (unless the change runs the full suite) its delta, both snapshots, the new tree's
+test items, and the reasons the change runs the full suite.
+"""
+struct ChangeSet
+    changes::Vector{FileChange}
+    classes::Vector{Symbol}
+    deltas::Vector{Union{Nothing, Delta}}
+    old_snapshot::Snapshot
+    new_snapshot::Snapshot
+    new_tests::Vector{Located}
+    full::Vector{String}
+end
+
+"The change set from revision `base` to `target` (the working tree when empty) under `map`."
+function change_set(
+        root::AbstractString,
+        map::CoverageMap,
+        base::AbstractString,
+        target::AbstractString,
+    )::ChangeSet
     changes = file_changes(root, base, target)
     old_snapshot = Snapshot(String(root), String(base))
     new_snapshot = Snapshot(String(root), String(target))
@@ -1258,12 +1318,6 @@ function select_testsets(
         path_class(change.path, test_paths, test_dir, map.sources)
             for change in changes
     ]
-    runnable = Set(
-        located.item.name
-            for located in new_tests
-            if located.item.kind == :testset
-    )
-
     full = full_suite_reasons(changes, map.sources, map.project)
     if !isempty(map.suites)
         # The runner decides how every suite runs.
@@ -1276,33 +1330,22 @@ function select_testsets(
             ],
         )
     end
-    if !isempty(full)
-        everything = [
-            name => "full suite: " * reason
-                for name in sort(collect(runnable))
-                for reason in full
-        ]
-        return Selection(everything, full, String[], String[], 0, String[])
-    end
+    deltas = Union{Nothing, Delta}[
+        isempty(full) && class in (:source, :test) ? file_delta(old_snapshot, new_snapshot, change) : nothing
+            for (change, class) in zip(changes, classes)
+    ]
+    return ChangeSet(changes, classes, deltas, old_snapshot, new_snapshot, new_tests, full)
+end
 
-    source_deltas = [
-        file_delta(old_snapshot, new_snapshot, change)
-            for (change, class) in zip(changes, classes)
-            if class == :source
+"The selection of a change set that runs the full suite: every runnable testset, for each reason."
+function full_selection(set::ChangeSet)::Selection
+    runnable = Set(located.item.name for located in set.new_tests if located.item.kind == :testset)
+    everything = [
+        name => "full suite: " * reason
+            for name in sort(collect(runnable))
+            for reason in set.full
     ]
-    test_deltas = [
-        file_delta(old_snapshot, new_snapshot, change)
-            for (change, class) in zip(changes, classes)
-            if class == :test
-    ]
-    any_jl = any(endswith(change.path, ".jl") for change in changes)
-    fixtures = [
-        basename(change.path)
-            for (change, class) in zip(changes, classes)
-            if class == :fixture
-    ]
-    context = selection_context(map, old_snapshot, new_snapshot, new_tests)
-    return select_deltas(context, source_deltas, test_deltas, fixtures, any_jl)
+    return Selection(everything, set.full, String[], String[], 0, String[])
 end
 
 """
@@ -1391,6 +1434,31 @@ function SelectionContext(
         map, collect(Located, old_sources), collect(Located, new_tests),
         Dict{String, Set{String}}(suite_files), Set{String}(runnable), test_binders, static_names,
     )
+end
+
+"""
+The selection of a change set that does not run the full suite. With `edit`, the change to its
+source file is replaced by `edit` (left out when `edited` is false: the file is as in the old
+tree).
+"""
+function select_change_set(
+        context::SelectionContext,
+        set::ChangeSet,
+        edit::Union{Nothing, Delta} = nothing,
+        edited::Bool = false,
+    )::Selection
+    kept = [
+        index for index in eachindex(set.changes)
+            if edit === nothing || set.changes[index].path != edit.path
+    ]
+    source_deltas = Delta[set.deltas[index] for index in kept if set.classes[index] == :source]
+    if edit !== nothing && edited
+        push!(source_deltas, edit)
+    end
+    test_deltas = Delta[set.deltas[index] for index in kept if set.classes[index] == :test]
+    any_jl = any(endswith(set.changes[index].path, ".jl") for index in kept) || (edit !== nothing && edited)
+    fixtures = [basename(set.changes[index].path) for index in kept if set.classes[index] == :fixture]
+    return select_deltas(context, source_deltas, test_deltas, fixtures, any_jl)
 end
 
 """
@@ -1717,20 +1785,23 @@ testset_names(selection::Selection)::Vector{String} = sort(unique(first.(selecti
 
 Selects the map's testsets for in-memory edits of the working tree's source files, one edit
 at a time, as a mutation tester makes them: `select_edit(selector, path, text)` is the
-selection `select` would make if the working tree differed from now only in `path` holding
-`text`. The working tree's sources and tests are parsed once, here, so an edit costs the
-parse of the one file it changes.
+selection `select` makes from the map's commit to the working tree with `path` holding `text`.
+So it includes what the working tree already changes since the map's commit, as `select`
+does; a map whose commit is the working tree's adds nothing. The trees and the change between
+them are read once, here, so an edit costs the parse of the one file it changes.
 
 `map` is relative to `root`. With `build`, an absent map is built statically at `HEAD`, as
-`select` builds one. The map's coverage describes its commit: a testset that the change from
-that commit to the working tree selects may run code the map does not show it running.
+`select` builds one. A map whose commit git no longer has cannot be compared with the working
+tree: it raises an error (refresh or rebuild the map).
 """
 struct EditSelector
     root::String
     map::CoverageMap
     context::SelectionContext
-    texts::Dict{String, String}
-    items::Dict{String, Vector{Item}}
+    change::ChangeSet
+    texts::Dict{String, String}          # each working-tree source file's text at the map's commit
+    items::Dict{String, Vector{Item}}    # and its items there
+    present::Set{String}                 # the files among them the map's commit holds
 end
 
 function EditSelector(
@@ -1744,20 +1815,20 @@ function EditSelector(
         StaticMap.ensure_map(root, map_path, String[])
     end
     coverage = read_map(map_path)
-    tree = Snapshot(root, "")
-    tests = test_items(tree, coverage.tests, coverage.suites, coverage.suite_pattern)
-    # The edits are made to the working tree, so it is both the old and the new tree.
-    context = selection_context(coverage, tree, tree, tests)
+    if !commit_exists(root, coverage.commit)
+        error("the map's commit ", coverage.commit, " is not in the repository: refresh or rebuild the map")
+    end
+    set = change_set(root, coverage, coverage.commit, "")
+    context = selection_context(coverage, set.old_snapshot, set.new_snapshot, set.new_tests)
+    present = Set(snapshot_source_files(set.old_snapshot, coverage.sources))
+    texts = Dict{String, String}()
     items = Dict{String, Vector{Item}}()
-    for located in context.old_sources
-        push!(get!(items, located.path, Item[]), located.item)
+    for path in snapshot_source_files(set.new_snapshot, coverage.sources)
+        held = path in present
+        texts[path] = held ? read_file(set.old_snapshot, path) : ""
+        items[path] = items_at(set.old_snapshot, path, held)
     end
-    paths = snapshot_source_files(tree, coverage.sources)
-    texts = Dict(path => read_file(tree, path) for path in paths)
-    for path in paths
-        get!(items, path, Item[])
-    end
-    return EditSelector(root, coverage, context, texts, items)
+    return EditSelector(root, coverage, context, set, texts, items, present)
 end
 
 "The testsets an edit selector can select: those of the working tree's tests, sorted."
@@ -1779,15 +1850,15 @@ function select_edit(
     if !haskey(selector.texts, path)
         error(path, " is not a source file of the map (sources: ", join(selector.map.sources, ", "), ")")
     end
+    new_items = source_items(text, path)
+    if !isempty(selector.change.full)
+        return full_selection(selector.change)
+    end
     original = selector.texts[path]
     # The hunks come from git, as `select`'s do, then pass through the same item delta.
-    delta = items_delta(
-        path,
-        selector.items[path],
-        source_items(text, path),
-        text_hunks(selector.root, original, text),
-    )
-    return select_deltas(selector.context, [delta], Delta[], String[], text != original)
+    delta = items_delta(path, selector.items[path], new_items, text_hunks(selector.root, original, text))
+    edited = !(path in selector.present) || text != original
+    return select_change_set(selector.context, selector.change, delta, edited)
 end
 
 """
@@ -2214,6 +2285,7 @@ function build_map(
             "suites" => String(suites),
             "suite_pattern" => String(suite_pattern),
             "sources" => String[sources...],
+            "environment" => environment_digest(root, sources, project),
         ),
         "definitions" => definitions,
         "testsets" => Dict{String, Any}(vcat(results, carried_entries)),
@@ -2251,10 +2323,13 @@ tree (one made through a throwaway index, say), and return the testsets it ran.
 A coverage map keeps the coverage of every testset the change from the map's commit to the
 working tree does not reach (`affected_testsets`), and runs the others, and any testset the
 map lacks, under coverage as `build` does: a testset that runs no changed code executes what it
-did. A change to `Project.toml` or `Manifest.toml`, or a map commit git no longer has, runs every
-testset. A static map is rebuilt at `commit` with its recorded options; its cache re-infers only
-what changed. An absent map is built statically. Nothing happens when the map's commit already
-holds the working tree. `environment` is what `build --env` sets for each testset process.
+did. A change to `Project.toml` or `Manifest.toml`, tracked or not (the map records a digest of
+them, `environment_digest`), or a map commit git no longer has, runs every testset. A static map
+is rebuilt at `commit` with its recorded options; its cache re-infers only what changed. An
+absent map is built statically. Nothing happens when the map's commit already holds the working
+tree, its environment files are as recorded and, for a static map, the walker, Julia and Fallout
+that built it are the ones running. `environment` is what `build --env` sets for each testset
+process.
 """
 function refresh_map(
         root::AbstractString,
@@ -2272,7 +2347,14 @@ function refresh_map(
     end
     meta = TOML.parsefile(map_path)["meta"]
     old_commit = String(meta["commit"])
-    if commit_exists(root, old_commit) && !code_changed(root, old_commit, meta)
+    project = String(get(meta, "project", "."))
+    # An ignored Manifest is in no commit: compare the environment files themselves.
+    environment_changed = get(meta, "environment", "") !=
+        environment_digest(root, String[meta["sources"]...], project)
+    builder_changed = haskey(meta, "static") &&
+        get(meta, "builder_fingerprint", "") != StaticMap.builder_fingerprint()
+    if commit_exists(root, old_commit) && !code_changed(root, old_commit, meta) &&
+            !environment_changed && !builder_changed
         return String[]
     end
     if haskey(meta, "static")
@@ -2283,7 +2365,7 @@ function refresh_map(
     tests = test_items(Snapshot(root, ""), old.tests, old.suites, old.suite_pattern)
     current = Set(located.item.name for located in tests if located.item.kind == :testset)
     reached = current
-    if commit_exists(root, old.commit)
+    if !environment_changed && commit_exists(root, old.commit)
         selection = select_testsets(root, old, old.commit, "")
         if isempty(selection.full)
             reached = Set(affected_testsets(selection))

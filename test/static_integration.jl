@@ -80,6 +80,12 @@ end
     snapshot = snapshot_commit(root)
     @test Fallout.refresh_map(root, snapshot; map = "map.toml") == ["calls f", "calls g"]
     @test read_map(joinpath(root, "map.toml")).commit == snapshot
+    @test isempty(Fallout.refresh_map(root, snapshot; map = "map.toml"))
+    # A map another walker, Julia or Fallout built is rebuilt, though no code changed.
+    map_path = joinpath(root, "map.toml")
+    write(map_path, replace(read(map_path, String), r"builder_fingerprint = \"[0-9a-f]+\"" => "builder_fingerprint = \"old\""))
+    @test Fallout.refresh_map(root, snapshot; map = "map.toml") == ["calls f", "calls g"]
+    @test Fallout.TOML.parsefile(map_path)["meta"]["builder_fingerprint"] == Fallout.StaticMap.builder_fingerprint()
 end
 
 """Select from a stale static map and return the rebuild diagnostics."""

@@ -236,6 +236,8 @@ end
         "h(s::S) = s.a\n" => "",
         "unused(x) = x" => "unused(x) = x\nBase.:(==)(a::S, b::S) = true",
         "unused(x) = x" => "unused(x) = x\nnewfunction(y) = y",
+        # A NUL byte in a string: git would call the file binary and give no hunks.
+        "x + 1" => "x + sizeof(\"\0\")",
     ]
     for (old, new) in edits
         edited = replace(PACKAGE, old => new)
@@ -253,8 +255,10 @@ end
 
     # The hunks come from git, as `select`'s do.
     @test Fallout.text_hunks(root, "a\nb\nc\n", "a\nb\nc\n") == Fallout.Hunk[]
-    # Text git takes for binary differs, yet has no lines to place.
-    @test Fallout.text_hunks(root, "a\0b\n", "a\0c\n") == Fallout.Hunk[]
+    # Text holding a NUL byte is still diffed as text.
+    nul = only(Fallout.text_hunks(root, "a\0b\n", "a\0c\n"))
+    @test (nul.old_first, nul.old_count, nul.new_first, nul.new_count) == (1, 1, 1, 1)
+    @test names_in(Fallout.select_edit(selector, "src/P.jl", replace(PACKAGE, "x + 1" => "x + sizeof(\"\0\")"))) == ["runs f"]
     insertion = only(Fallout.text_hunks(root, "a\nc\n", "a\nb\nc\n"))
     @test (insertion.old_first, insertion.old_count, insertion.new_first, insertion.new_count) == (1, 0, 2, 1)
     deletion = only(Fallout.text_hunks(root, "a\nb\nc\n", "a\nc\n"))
@@ -262,6 +266,35 @@ end
     @test deletion.removed == ["b"]
     two = Fallout.text_hunks(root, "a\nb\nc\nd\ne\n", "A\nb\nc\nd\nE\n")
     @test [(hunk.old_first, hunk.new_first) for hunk in two] == [(1, 1), (5, 5)]
+end
+
+@testset "an edit to a tree that changed since the map's commit selects what select does" begin
+    root = mktempdir()
+    fixture(root)
+    # The working tree already changes f; the map's coverage is of its commit.
+    write_file(root, "src/P.jl", replace(PACKAGE, "x + 1" => "x + 2"))
+    selector = Fallout.EditSelector(root; map = "map.toml", build = false)
+    edited = replace(PACKAGE, "x + 1" => "x + 2", "return 2x" => "return 3x")
+    in_memory = Fallout.select_edit(selector, "src/P.jl", edited)
+    @test names_in(in_memory) == ["runs f", "runs g"]
+    on_disk = selected_after(root, "src/P.jl", "return 2x", "return 3x")
+    @test names_in(in_memory) == names_in(on_disk)
+    # Editing the file back to the map's commit leaves nothing changed.
+    @test isempty(Fallout.select_edit(selector, "src/P.jl", PACKAGE).reasons)
+    # An uncommitted change to a test is part of every edit's selection too.
+    write_file(root, "test/runtests.jl", replace(TESTS, "P.g(1) == 2" => "P.g(2) == 4"))
+    write_file(root, "src/P.jl", PACKAGE)
+    tested = Fallout.EditSelector(root; map = "map.toml", build = false)
+    @test names_in(Fallout.select_edit(tested, "src/P.jl", replace(PACKAGE, "x + 1" => "x + 2"))) ==
+        ["runs f", "runs g"]
+    # A map whose commit is gone cannot be compared with the working tree.
+    write_file(root, "gone.toml", replace(read(joinpath(root, "map.toml"), String), r"commit = \"[0-9a-f]+\"" => "commit = \"$("0"^40)\""))
+    @test_throws "not in the repository" Fallout.EditSelector(root; map = "gone.toml", build = false)
+    # An environment change runs the full suite, whatever the edit.
+    write_file(root, "Project.toml", "name = \"P\"\nversion = \"0.1.0\"\n")
+    full = Fallout.select_edit(Fallout.EditSelector(root; map = "map.toml", build = false), "src/P.jl", PACKAGE)
+    @test !isempty(full.full)
+    @test names_in(full) == ["helper user", "runs f", "runs g", "uses S"]
 end
 
 @testset "an import changes the names it stops importing, not the ones it starts importing" begin
@@ -845,6 +878,13 @@ end
     # A snapshot of the same tree leaves the map alone.
     @test isempty(Fallout.refresh_map(root, snapshot_commit(root); map = "built.toml"))
     @test read_map(joinpath(root, "built.toml")).commit == snapshot
+    # An ignored Manifest is in no commit, yet changes what the tests run against: every testset runs.
+    write_file(root, ".git/info/exclude", "Manifest.toml\n")
+    write_file(root, "Manifest.toml", "# an ignored environment\n")
+    same = snapshot_commit(root)
+    @test !Fallout.code_changed(root, snapshot, Fallout.TOML.parsefile(joinpath(root, "built.toml"))["meta"])
+    @test Fallout.refresh_map(root, same; map = "built.toml", jobs = 4) == sort(collect(keys(before.testsets)))
+    @test isempty(Fallout.refresh_map(root, same; map = "built.toml"))
 end
 
 """

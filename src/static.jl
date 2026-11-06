@@ -295,6 +295,7 @@ function map_document(
             "extra_testset_macros" => options.extra_testset_macros,
             "cache" => options.cache_directory,
             "builder_fingerprint" => builder_fingerprint(),
+            "environment" => Fallout.environment_digest(options.root, options.sources, options.project),
         ),
         "definitions" => headers,
         "testsets" => testsets,

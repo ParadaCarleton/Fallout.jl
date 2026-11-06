@@ -192,13 +192,17 @@ ran = Fallout.refresh_map(root, snapshot; map = "test-impact-map.toml")
 ```
 
 A coverage map re-runs, under coverage, only the testsets the change since its commit reaches
-(`Fallout.affected_testsets`) and the testsets it lacks, and keeps the rest. A static map is
-rebuilt at the snapshot, and its cache re-infers only what changed. Nothing runs when no code
-changed. Gremlins refreshes the map this way before every run.
+(`Fallout.affected_testsets`) and the testsets it lacks, and keeps the rest. A change to the
+environment files, tracked or ignored, re-runs every testset. A static map is rebuilt at the
+snapshot, and its cache re-infers only what changed; one another walker, Julia or Fallout built
+is rebuilt even when no code changed. Nothing runs when nothing changed. Gremlins refreshes the
+map this way before every run.
 
-`select_edit` takes the same path as `select` for the same change on disk: git diffs the two
-texts with the same flags, and the same item delta, context builder and rules follow. Like `select`, it trusts the map's coverage, which describes the map's
-commit. [Gremlins.jl](https://github.com/ParadaCarleton/Gremlins.jl) uses it to run each
+`select_edit` is the selection `select` makes from the map's commit to the working tree with the
+edit applied: git diffs the texts with the same flags, and the same item delta, context builder
+and rules follow. So with a map that is behind the working tree, every edit's selection also
+holds what the working tree already changes; refresh the map to keep selections narrow. A map
+whose commit git no longer has raises an error. [Gremlins.jl](https://github.com/ParadaCarleton/Gremlins.jl) uses it to run each
 mutant against only the testsets that can detect it. The public names (`public`, not
 exported) are `EditSelector`, `select_edit`, `select_testsets`, `testset_names`,
 `affected_testsets`, `refresh_map`, `read_map`, `runner_arguments`, `retest_pattern`,
