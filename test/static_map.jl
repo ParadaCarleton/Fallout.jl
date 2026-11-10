@@ -797,6 +797,9 @@ end
 @testset "static helper options cover both platform separators and optional macro prefixes" begin
     @test StaticRecords.load_path_separator(true) == ';'
     @test StaticRecords.load_path_separator(false) == ':'
+    # The parent's environments hold Fallout's dependencies; the project comes first, no entry repeats.
+    path = split(StaticRecords.child_load_path("/pkg", ["/pkg", "/tools"], "/fallout", ':'), ':')
+    @test path == ["/pkg", "/tools", "/fallout", "@stdlib"]
     @test StaticRecords.macro_prefix("custom_testset") == ""
     @test StaticRecords.mentioned_identifiers("@custom_testset \"case\"") == ["case"]
     @test StaticRecords.other_mentions("@custom_testset \"case\"") == ["case"]
